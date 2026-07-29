@@ -194,6 +194,15 @@ Tokens are stable across commands and sessions, so the model can still correlate
 objects and act on them (`govc-safe vm.power -off VM-0017` resolves the token
 before calling vCenter).
 
+On the JSON path the wrapper walks the parsed document rather than its text, so
+keys and structure come through exactly as govc emitted them and only values are
+rewritten. Managed object references are preserved as tokens —
+`"self": {"type": "VirtualMachine", "value": "VM-0001"}` — which is what lets the
+model join two outputs together without ever seeing a name. Plain-text output has
+no such structure to lean on, so a VM named after a field label can have the
+label tokenised alongside it; that is over-redaction rather than a leak, and
+`-json` avoids it.
+
 **You still read everything in cleartext.** A `MessageDisplay` hook rehydrates
 Claude's replies as they render, so the model writes
 
@@ -357,16 +366,23 @@ Two scripts, testing two different things:
 ```
 
 `test-redaction.sh` runs the whole permitted command surface against vcsim —
-including snapshots seeded with deliberately identifying names — and fails if any
-real identifier, IP, MAC or UUID survives, or if the allowlist stops behaving as
-specified. `test-deployment.sh` checks the things the engine test cannot: that
-`govc-safe` is on your PATH, that your shell is *not* exporting `GOVC_*`, that
-the creds file is 0600, that plain `govc` cannot authenticate from a clean
-environment, and that the hook actually denies direct `govc` and `rehydrate`.
+including snapshots seeded with deliberately identifying names, and a VM named
+after a JSON key — and fails if any real identifier, IP, MAC or UUID survives, or
+if the allowlist stops behaving as specified. It also grades the opposite
+direction, which a leak scan cannot see: a wrapper that deleted everything would
+score a perfect pass, so the suite asserts that keys, structure and MoRefs
+survive redaction intact.
+
+`test-deployment.sh` checks the things the engine test cannot: that `govc-safe`
+is on your PATH, that your shell is *not* exporting `GOVC_*`, that the creds file
+is 0600, that plain `govc` cannot authenticate from a clean environment, and that
+the hook actually denies direct `govc` and `rehydrate`.
 
 Limits, stated plainly: free text (annotations, snapshot descriptions, event
 messages) is **dropped**, not pseudonymised, because arbitrary prose cannot be
-safely rewritten. Structure still leaks by design — counts, cluster shape,
+safely rewritten — a `value` with no `type` sibling counts as prose, while a
+`{"type", "value"}` pair is a managed object reference and is tokenised instead.
+Structure still leaks by design — counts, cluster shape,
 guest-OS versions and ESXi build numbers survive, since removing them removes the
 point of the reports. And this protects data in transit to the model; it is not a
 substitute for a least-privilege vCenter role, which is what prevents unwanted

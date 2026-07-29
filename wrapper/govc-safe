@@ -195,11 +195,19 @@ class Refused(Exception):
 class TokenMap:
     """Stable real-value -> token mapping, persisted locally."""
 
+    # Kinds that feed the substitution alternation. Only an insert into one of
+    # these invalidates the cached pattern; redaction mints IP/UUID/FQDN/VMDIR
+    # rows constantly and must not rebuild the alternation each time.
+    NAME_KINDS = ("_name", "_moref")
+
     def __init__(self, path):
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
         new = not os.path.exists(path)
+        self._pattern = None
+        self._lookup = {}
+        self._pattern_stale = True
         self.db = sqlite3.connect(path, timeout=30, isolation_level=None)
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS tok ("
@@ -243,6 +251,8 @@ class TokenMap:
             self.db.execute("INSERT INTO tok (kind, real, token) VALUES (?,?,?)",
                             (kind, real, token))
             self.db.execute("COMMIT")
+            if kind in self.NAME_KINDS:
+                self._pattern_stale = True
             return token
         except Exception:
             self.db.execute("ROLLBACK")
@@ -252,6 +262,21 @@ class TokenMap:
         self.db.execute(
             "INSERT OR IGNORE INTO tok (kind, real, token) VALUES (?,?,?)",
             (kind, real, token))
+        if kind in self.NAME_KINDS:
+            self._pattern_stale = True
+
+    def name_pattern(self):
+        """Cached (pattern, lookup) for the name/MoRef substitution pass.
+
+        Redaction now walks a JSON tree string by string, so this is consulted
+        once per string value rather than once per run. Rebuilding it there --
+        a SQLite scan plus an re.compile over the whole inventory -- made the
+        walk quadratic in document size.
+        """
+        if self._pattern_stale:
+            self._pattern, self._lookup = _compile_name_pattern(self)
+            self._pattern_stale = False
+        return self._pattern, self._lookup
 
     def lookup(self, kind, token):
         row = self.db.execute(
@@ -395,11 +420,37 @@ WINUSER_RE = re.compile(r"\b[A-Za-z0-9_-]+\\[A-Za-z0-9._-]+")
 FQDN_RE = re.compile(r"\b[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+\b")
 
 
-def build_name_pattern(tmap):
+_WORD_CH = "A-Za-z0-9_"
+
+
+def _is_word(c):
+    return bool(c) and (c.isalnum() or c == "_")
+
+
+def _bounded(name):
+    """Escape a name and fence it off from surrounding identifier characters.
+
+    The boundaries are conditional on the name's OWN edge characters, not
+    unconditional \\b. A name may begin or end with punctuation -- ".hidden"
+    inside "foo.hidden" -- and a fixed lookbehind would stop matching it, which
+    would be a leak rather than a cosmetic problem.
+    """
+    pre = "(?<![%s])" % _WORD_CH if _is_word(name[:1]) else ""
+    post = "(?![%s])" % _WORD_CH if _is_word(name[-1:]) else ""
+    return pre + re.escape(name) + post
+
+
+def _compile_name_pattern(tmap):
     """One alternation over all known names, longest first.
 
     Longest-first matters: a VM named "DC0_H0_VM0" must be replaced before a
     datacenter named "DC0", or "_H0_VM0" would be left behind.
+
+    Every alternative carries its own word boundaries. Without them a VM named
+    "config" -- and short names like "log", "name", "host", "db" exist in every
+    grown environment -- rewrote "configStatus" to "VM-0001Status": syntactically
+    valid, semantically destroyed. Substituting a substring of a longer
+    identifier is never right; the identifier it sits in is a different thing.
     """
     rows = tmap.db.execute(
         "SELECT real, token FROM tok WHERE kind IN ('_name','_moref')").fetchall()
@@ -407,7 +458,11 @@ def build_name_pattern(tmap):
         return None, {}
     lookup = {r: t for r, t in rows}
     names = sorted(lookup, key=len, reverse=True)
-    return re.compile("|".join(re.escape(n) for n in names)), lookup
+    return re.compile("|".join(_bounded(n) for n in names)), lookup
+
+
+def build_name_pattern(tmap):
+    return tmap.name_pattern()
 
 
 def redact_text(text, tmap):
@@ -493,17 +548,53 @@ def tokenise_paths(text, tmap):
     return text
 
 
-def drop_free_text(obj):
-    """Blank prose and principal fields; they cannot be pseudonymised."""
+def moref_token(obj, tmap):
+    """Token for a dict that is a managed object reference, else None.
+
+    govc renders every MoRef as {"type": "VirtualMachine", "value": "vm-123"}.
+    Because "value" is a free-text key, blanking ran first and destroyed all of
+    them -- self, parent, datastore, network, recentTask, and the snapshot
+    MoRefs -- leaving the JSON with no stable axis to correlate objects on. Only
+    `snapshot.tree -i` still gave the caller an identifier to hold onto.
+
+    The value is tokenised rather than merely spared: learn_inventory mints with
+    exactly this kind and key, so a learned object resolves to the same token it
+    carries everywhere else, and an unlearned type (Task, Alarm, PerfCounter)
+    gets a MOREF-nn rather than passing a raw MoRef through.
+    """
+    if not isinstance(obj, dict):
+        return None
+    typ, val = obj.get("type"), obj.get("value")
+    if not (isinstance(typ, str) and typ.strip() and isinstance(val, str) and val.strip()):
+        return None
+    return tmap.token_for(TYPE_PREFIX.get(typ, "MOREF"), val)
+
+
+def redact_json(obj, tmap):
+    """Redact a parsed JSON tree: values are rewritten, keys are not.
+
+    Redaction used to run over the SERIALIZED document, so the name alternation
+    matched inside key names as readily as inside values -- a VM named "config"
+    turned the "config" object itself into "VM-0001". Keys in govc's output come
+    from the vim25 Go structs; they are schema, not data, and nothing about the
+    environment can appear in them. Walking the tree keeps them intact and makes
+    the free-text and MoRef rules structural rather than textual.
+    """
     if isinstance(obj, dict):
-        return {
-            k: ("[redacted: free text]"
-                if k.lower() in FREE_TEXT_KEYS and isinstance(v, str) and v.strip()
-                else drop_free_text(v))
-            for k, v in obj.items()
-        }
+        moref = moref_token(obj, tmap)
+        out = {}
+        for k, v in obj.items():
+            if moref is not None and k == "value":
+                out[k] = moref
+            elif k.lower() in FREE_TEXT_KEYS and isinstance(v, str) and v.strip():
+                out[k] = "[redacted: free text]"
+            else:
+                out[k] = redact_json(v, tmap)
+        return out
     if isinstance(obj, list):
-        return [drop_free_text(v) for v in obj]
+        return [redact_json(v, tmap) for v in obj]
+    if isinstance(obj, str):
+        return redact_text(obj, tmap)
     return obj
 
 
@@ -536,9 +627,8 @@ def redact_output(out, tmap):
     objs = parse_json_stream(out)
     if objs is None:
         return redact_text(out, tmap)
-    cleaned = [drop_free_text(o) for o in objs]
-    body = "\n".join(json.dumps(o, indent=2) for o in cleaned)
-    return redact_text(body, tmap) + "\n"
+    cleaned = [redact_json(o, tmap) for o in objs]
+    return "\n".join(json.dumps(o, indent=2) for o in cleaned) + "\n"
 
 
 def scrub_error(err, tmap=None):

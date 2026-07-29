@@ -79,11 +79,23 @@ output.
    cannot be reliably pseudonymised. Do not tell the user a VM "has no
    annotation" — say the annotation was withheld.
 
-7. **Safety rules still apply**, exactly as for unrestricted govc: read-only
+   **Managed object references survive, as tokens.** `"self"`, `"parent"`,
+   `"host"`, `"datastore"` and friends come back as
+   `{"type": "VirtualMachine", "value": "VM-0001"}`. That `value` is the same
+   token the object carries everywhere else, so it is your join key: use it to
+   correlate objects across two JSON outputs rather than matching on names.
+
+7. **Prefer `-json`.** On the JSON path the wrapper walks the parsed document
+   and rewrites values only, so keys and structure are exact. Plain-text output
+   has no such structure, so a VM named after a field label (`config`, `name`,
+   `host`) can cause a label to be tokenised too. That is over-redaction, never a
+   leak — but `-json` avoids it.
+
+8. **Safety rules still apply**, exactly as for unrestricted govc: read-only
    first; confirm before anything destructive, naming the affected **tokens**;
    graceful shutdown before hard power-off; snapshots are not backups.
 
-8. **Snapshots: remove by `SNAP-nn` token only.** The wrapper refuses
+9. **Snapshots: remove by `SNAP-nn` token only.** The wrapper refuses
    `snapshot.remove` by name and refuses `'*'` outright — those are not bugs to
    work around. Get the token from `snapshot.tree -vm VM-0001 -i` and remove one
    snapshot per call:

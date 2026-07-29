@@ -38,6 +38,11 @@ spec.json
 /export-dir/
 /debug/
 
+# Python bytecode. govc-safe has no .py extension, but importing it from the
+# test suite still leaves a __pycache__ next to it.
+__pycache__/
+*.pyc
+
 # Editors
 .vscode/
 .idea/

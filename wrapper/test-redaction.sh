@@ -61,9 +61,25 @@ govc snapshot.create -vm "$SEED_VM" "$SNAP_B" >/dev/null 2>&1
 echo "[..] renaming it so its datastore path diverges from its name"
 govc vm.change -vm "$SEED_VM" -name RENAMED-VM >/dev/null 2>&1
 
+# Name a second VM after a JSON key. Substitution used to run over the
+# serialized document with no word boundaries, so this VM rewrote "configStatus"
+# to "VM-0002Status" and turned the whole "config" object into "VM-0002" -- valid
+# JSON, destroyed meaning. Short names like config, log, name, host and db exist
+# in every grown environment, so this is a fixture, not a curiosity.
+COLLIDE_VM=/DC0/vm/DC0_H0_VM1
+govc vm.info "$COLLIDE_VM" >/dev/null 2>&1 || COLLIDE_VM=/DC0/vm/config
+echo "[..] naming a second VM 'config' to collide with govc's own JSON keys"
+govc vm.change -vm "$COLLIDE_VM" -name config >/dev/null 2>&1
+
 OUT="$WORK/all-output.txt"
 : >"$OUT"
 policy_fail=0
+shape_fail=0
+
+# The wrapper's token grammar, mirroring TOKEN_RE in govc-safe. Spelled out
+# rather than [A-Z]+ so the invariants below do not fire on real strings that
+# merely look token-shaped, such as a snapshot named "INC-4471x".
+TOK='(DC|VM|HOST|CLUSTER|DS|DSCLUSTER|NET|PG|DVS|POOL|VAPP|FOLDER|SNAP|VMDIR|IP|IP6|MAC|UUID|USER|FQDN|MOREF|OBJ)'
 
 # Must SUCCEED. A non-zero exit means the wrapper is over-refusing, which would
 # otherwise look like a pass: no output, therefore no leaks.
@@ -144,6 +160,135 @@ refuse snapshot.remove -vm VM-0001 "$SNAP_A"                 # by name
 refuse snapshot.remove -vm VM-0001 rollback                  # by partial name
 refuse snapshot.remove -vm VM-0001
 
+# The engine, driven directly against a synthetic document.
+#
+# The integration pass above cannot grade these two properties: vcsim's fixture
+# happens to contain no VALUE in which a short object name sits inside a longer
+# identifier, so a wrapper with the boundary bug reintroduced still passes every
+# scan below. Both bugs were reported against real inventories, where names like
+# config, log, name, host and db are ordinary. Rather than contort the simulator
+# fixture into reproducing them, assert on a document that has the shape.
+echo "[..] checking the redaction engine against a synthetic document"
+if ! python3 - "$PWD/govc-safe" <<'PY'
+import importlib.machinery, importlib.util, json, os, sys, tempfile
+
+loader = importlib.machinery.SourceFileLoader("govc_safe", sys.argv[1])
+spec = importlib.util.spec_from_loader("govc_safe", loader)
+gs = importlib.util.module_from_spec(spec)
+loader.exec_module(gs)
+
+db = os.path.join(tempfile.mkdtemp(), "map.db")
+tmap = gs.TokenMap(db)
+# What learn_inventory would have recorded for a VM that is named after a JSON
+# key, plus one ordinary neighbour.
+for objtype, moref, name in (("VirtualMachine", "vm-52", "config"),
+                             ("VirtualMachine", "vm-53", "DC0_H0_VM0"),
+                             ("HostSystem", "host-30", "DC0_H0")):
+    tok = tmap.token_for(gs.TYPE_PREFIX[objtype], moref)
+    tmap.add_alias("_name", name, tok)
+    tmap.add_alias("_moref", moref, tok)
+CONFIG_TOK = tmap.db.execute(
+    "SELECT token FROM tok WHERE kind='_name' AND real='config'").fetchone()[0]
+
+doc = {"virtualMachines": [{
+    "self": {"type": "VirtualMachine", "value": "vm-52"},
+    "configStatus": "green",
+    "configIssue": None,
+    "config": {
+        "name": "config",
+        "annotation": "owned by ops",
+        "guestId": "configuredGuest",
+        "files": {"vmPathName": "[LocalDS_0] DC0_H0_VM0/DC0_H0_VM0.vmx"},
+    },
+    "runtime": {"host": {"type": "HostSystem", "value": "host-30"}},
+    "customValue": [{"key": 101, "value": "cost centre 4711"}],
+}]}
+got = gs.redact_output(json.dumps(doc), tmap)
+out = json.loads(got)
+vm = out["virtualMachines"][0]
+
+bad = []
+def check(cond, msg):
+    if not cond:
+        bad.append(msg)
+
+# Keys are schema. Substitution must never touch them, whole or partial.
+check("configStatus" in vm, "the configStatus key was rewritten")
+check("configIssue" in vm, "the configIssue key was rewritten")
+check("config" in vm, "the config object key was rewritten")
+# Values are data, and a whole-word name in a value must still tokenise.
+check(vm["config"]["name"] == CONFIG_TOK,
+      "the name VALUE was not tokenised: %r" % vm["config"]["name"])
+# ... but only as a whole word. "configuredGuest" is not the VM named "config".
+check(vm["config"]["guestId"] == "configuredGuest",
+      "a name was substituted inside a longer identifier: %r"
+      % vm["config"]["guestId"])
+# MoRefs carry the correlation axis and must survive as tokens, not be blanked.
+check(vm["self"]["value"] == CONFIG_TOK,
+      "the self MoRef did not resolve to the object's own token: %r"
+      % vm["self"]["value"])
+check(vm["self"]["type"] == "VirtualMachine", "the MoRef type was rewritten")
+check(gs.TOKEN_RE.fullmatch(vm["runtime"]["host"]["value"] or ""),
+      "the host MoRef was not tokenised: %r" % vm["runtime"]["host"]["value"])
+# A "value" with no "type" sibling is still prose.
+check(vm["customValue"][0]["value"] == "[redacted: free text]",
+      "a free-text value survived: %r" % vm["customValue"][0]["value"])
+check(vm["config"]["annotation"] == "[redacted: free text]",
+      "an annotation survived")
+# The plain-text path shares the alternation and needs the same boundaries.
+check(gs.redact_text("configStatus", tmap) == "configStatus",
+      "plain text: a name was substituted inside a longer identifier")
+check(gs.redact_text("config", tmap) == CONFIG_TOK,
+      "plain text: a whole-word name was not tokenised")
+
+for m in bad:
+    print("[DMG]  %s" % m)
+print("[ok]   engine: keys intact, values tokenised, MoRefs preserved"
+      if not bad else "")
+sys.exit(1 if bad else 0)
+PY
+then
+    shape_fail=1
+fi
+
+# Structure must SURVIVE redaction. A leak scan only grades what got through, so
+# it scores a wrapper that deletes everything as a perfect pass. These check the
+# other direction: that the caller is still left with something to reason about.
+echo "[..] checking that structure survives redaction"
+SHAPE="$WORK/vm-info.json"
+./govc-safe vm.info -json VM-0001 >"$SHAPE" 2>&1
+
+present() {  # present <label> <extended-regex>
+    if grep -qE "$2" "$SHAPE"; then
+        echo "[ok]   $1"
+    else
+        echo "[GONE] $1"
+        shape_fail=1
+    fi
+}
+
+# MoRefs are the only stable correlation axis in the JSON. "value" is a
+# free-text key, and blanking ran before redaction, so every MoRef -- self,
+# parent, datastore, network, recentTask -- became "[redacted: free text]" and
+# nothing in the document could be joined to anything else.
+present "MoRefs survive as tokens" '"value": "'"$TOK"'-[0-9]+"'
+present "the self MoRef is present" '"self":'
+if grep -A1 '"type": "' "$SHAPE" | grep -q '"value": "\[redacted'; then
+    echo "[GONE] a MoRef was blanked as free text"
+    shape_fail=1
+else
+    echo "[ok]   no MoRef blanked as free text"
+fi
+# Sparing MoRefs must not have spared prose with it: a "value" with no "type"
+# sibling is still free text. Graded over the whole capture, because vcsim's
+# fixture VMs carry no annotation -- the prose is in events and tasks.
+if grep -q '\[redacted: free text\]' "$OUT"; then
+    echo "[ok]   free text is still dropped"
+else
+    echo "[HOLE] nothing was dropped as free text"
+    shape_fail=1
+fi
+
 # Scan only what the wrapper emitted. The "--- $ govc-safe ..." lines are this
 # script's own record of what it invoked, and the must-refuse cases pass real
 # names in deliberately; grading those would be grading the test, not the code.
@@ -153,10 +298,10 @@ grep -v '^--- \$ govc-safe' "$OUT" >"$SCAN"
 echo "[..] scanning $(wc -c <"$SCAN") bytes of wrapper output for leaks"
 
 fail=0
-report() {  # report <label> <grep-args...>
-    local label="$1"; shift
+_scan() {  # _scan <extra-grep-flags> <label> <grep-args...>
+    local flags="$1" label="$2"; shift 2
     local hits
-    hits=$(grep -oiE "$@" "$SCAN" 2>/dev/null | sort -u | head -8)
+    hits=$(grep -o$flags -E "$@" "$SCAN" 2>/dev/null | sort -u | head -8)
     if [ -n "$hits" ]; then
         echo "[LEAK] $label"
         echo "$hits" | sed 's/^/         /'
@@ -165,6 +310,10 @@ report() {  # report <label> <grep-args...>
         echo "[ok]   no $label"
     fi
 }
+report() { _scan i "$@"; }
+# Case-sensitive. The token grammar is upper-case by construction, and matching
+# it case-insensitively would flag every lower-case MoRef the wrapper emits.
+report_cs() { _scan '' "$@"; }
 
 # vcsim ground-truth object names. "Resources", "vm", "host", "network" and
 # "datastore" are structural inventory folders and are intentionally preserved.
@@ -174,7 +323,19 @@ report "snapshot names"      'ACME-Corp|INC-4471|rollback|migration'
 # "DC0_H0_VM0" became "CLUSTER-01_VM0" because the cluster name "DC0_H0" is a
 # prefix of it. The remnant carries no literal "DC0", so the scan above cannot
 # see it. This invariant can: a token is always a whole word.
-report "partially substituted names" '\b[A-Z]+-[0-9]+_[A-Za-z0-9]'
+#
+# The earlier form required an underscore after the token, which only caught the
+# one case that had already been found. "VM-0001Status" -- a VM named "config"
+# eating the "configStatus" key -- walked straight past it. Any letter or
+# underscore after a token is a partial substitution. A trailing DIGIT cannot be
+# graded: it is indistinguishable from the token's own counter, which is why the
+# remnant class stops short of [0-9].
+report_cs "partially substituted names" "\\b$TOK-[0-9]+[A-Za-z_]"
+# Redaction walks the parsed tree and rewrites values only, so a token in KEY
+# position means substitution ran over the document text again. govc's JSON keys
+# come from the vim25 Go structs: they are schema, and nothing about the
+# environment can legitimately appear in one.
+report_cs "tokens in JSON key position" "^[[:space:]]*\"[^\"]*$TOK-[0-9]+[^\"]*\"[[:space:]]*:"
 report "IPv6 addresses"     '\b(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{1,4}\b'
 report "literal 'VM Network'" 'VM Network'
 # Octet-validated: ESXi driver version strings such as "lpfc 10.2.309.8" and
@@ -196,13 +357,18 @@ if [ "$policy_fail" -ne 0 ]; then
     echo "[!!] policy failures above: a command that must succeed failed, or a"
     echo "     command that must be refused went through."
 fi
+if [ "$shape_fail" -ne 0 ]; then
+    echo "[!!] structural failures above: redaction removed something the caller"
+    echo "     needs. A leak scan cannot see this -- deleting everything passes it."
+fi
 
-if [ "$fail" -eq 0 ] && [ "$policy_fail" -eq 0 ]; then
+if [ "$fail" -eq 0 ] && [ "$policy_fail" -eq 0 ] && [ "$shape_fail" -eq 0 ]; then
     echo "=== PASS: no real identifiers in $(wc -l <"$SCAN") lines, policy intact ==="
     exit 0
 fi
 [ "$fail" -ne 0 ] && echo "=== FAIL: real identifiers reached the output above ==="
 [ "$policy_fail" -ne 0 ] && echo "=== FAIL: allowlist policy is not behaving as specified ==="
+[ "$shape_fail" -ne 0 ] && echo "=== FAIL: redaction destroyed structure the caller needs ==="
 echo "    full capture kept at: $WORK/all-output.txt"
 trap - EXIT
 exit 1
