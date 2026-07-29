@@ -166,7 +166,7 @@ govc/
     └── storage-network.md        # datastores, disks, vSwitch/DVS/portgroups
 ```
 
-Battle-tested details baked in from real-world runs: PowerShell splits unquoted dotted flags like `-runtime.powerState` (quote them), `host.info` needs an explicit host when there's more than one, multi-datacenter vCenters need `-dc`/`GOVC_DATACENTER` context, and an empty datacenter answers `datastore.info` with a misleading "not found".
+Battle-tested details baked in from real-world runs: PowerShell splits unquoted dotted flags like `-runtime.powerState` (quote them), `host.info` needs an explicit host when there's more than one, multi-datacenter vCenters need `-dc`/`GOVC_DATACENTER` context, an empty datacenter answers `datastore.info` with a misleading "not found", `snapshot.remove` rejects the `id` integer that `vm.info -json` shows and wants the `snapshot-NNNNN` managed object ID instead, and a snapshot audit must recurse into `childSnapshotList` or it reports a deep chain as a single snapshot.
 
 Every reference file is cross-platform: bash examples work on Linux, macOS, WSL, and Git Bash, and each command that behaves differently under native PowerShell carries a `powershell` twin. Batch pipelines use `tr '\n' '\0' | xargs -0` rather than the GNU-only `xargs -d '\n'`, so they run unmodified on macOS and survive VM names containing spaces.
 
