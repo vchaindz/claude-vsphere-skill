@@ -9,6 +9,20 @@ govc.skill
 *.tar.gz
 *.zip
 
+# govc-safe token map — maps every token back to the REAL name, so it is as
+# sensitive as a full inventory dump. Never commit it.
+*.db
+map.db
+creds
+
+# Reports produced by the documented workflows. These are written in tokens, but
+# `govc-safe rehydrate` turns them back into real VM names, owners and
+# addresses — precisely what must not end up in a public repository.
+*.tsv
+*.csv
+*-report.*
+rehydrated-*
+
 # Credentials and local environment — never commit these
 .env
 .env.*

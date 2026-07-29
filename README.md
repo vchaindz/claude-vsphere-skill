@@ -170,11 +170,120 @@ Battle-tested details baked in from real-world runs: PowerShell splits unquoted 
 
 Every reference file is cross-platform: bash examples work on Linux, macOS, WSL, and Git Bash, and each command that behaves differently under native PowerShell carries a `powershell` twin. Batch pipelines use `tr '\n' '\0' | xargs -0` rather than the GNU-only `xargs -d '\n'`, so they run unmodified on macOS and survive VM names containing spaces.
 
+## Keeping real identifiers away from the model
+
+By default this skill runs `govc` through the agent's shell, so **raw output —
+VM names, IPs, MACs, usernames in events, guest OS versions — becomes part of the
+conversation** and is sent to whichever model provider you use.
+
+If that is not acceptable, `wrapper/` contains an optional pseudonymising proxy.
+`govc-safe` holds the credentials, runs the real command, and rewrites every
+identifier to a stable token before anything is printed:
+
+```
+$ govc-safe find / -type m
+/DC-01/vm/VM-0001
+/DC-01/vm/VM-0002
+```
+
+Tokens are stable across commands and sessions, so the model can still correlate
+objects and act on them (`govc-safe vm.power -off VM-0017` resolves the token
+before calling vCenter).
+
+**You still read everything in cleartext.** A `MessageDisplay` hook rehydrates
+Claude's replies as they render, so the model writes
+
+> `VM-0001` is powered on with a 91-day snapshot `SNAP-01` on `DS-01`
+
+and your terminal shows
+
+> `ACME-PROD-SQL01` is powered on with a 91-day snapshot `pre-upgrade INC-88213` on `LocalDS_0`
+
+This is display-only, which is the whole trick: *"the transcript and what Claude
+sees keep the original"*, so the real names are never transmitted — they are
+substituted locally, on your screen, after the response comes back. `/verbose`
+shows the untouched text if you want to confirm exactly what left the machine.
+For a cleartext copy on disk, `govc-safe rehydrate report.tsv`.
+
+Setup is per-user, no root:
+
+```bash
+./wrapper/setup.sh          # installs govc-safe + the hook to ~/.local/bin
+```
+
+It stores your vCenter credentials in `~/.config/govc-safe/creds` (0600) instead
+of your shell profile. That matters: Claude Code inherits the environment it is
+launched from, so `export GOVC_PASSWORD=...` in `.zshrc` hands the agent working
+credentials and makes the wrapper optional. With the credentials in a file the
+wrapper reads, the natural path to vCenter is the wrapper — which anonymises.
+
+**The skill needs no changes.** A `PreToolUse` hook rewrites `govc …` into
+`govc-safe …` before the command runs — including every invocation in a
+pipeline — so the stock `govc/` skill above keeps working exactly as written and
+there is no second command name to learn:
+
+```
+Claude writes:   govc find / -type m | xargs -0 govc vm.info -json
+actually runs:   govc-safe find / -type m | xargs -0 govc-safe vm.info -json
+```
+
+The wrapper is an allowlist, not a passthrough: it refuses `guest.*`,
+`host.esxcli`, `logs`, `permissions.ls`, `sso.*`, and flags like `-trace` and
+`-e` whose output cannot be redacted. Those refusals come back as ordinary tool
+errors explaining what to use instead, so Claude adapts rather than stalling.
+
+`wrapper/govc-private/` is an **optional** companion skill. You do not need it —
+it adds data-minimisation habits (count before list, aggregate before row-level)
+and explains the token vocabulary up front. Install it if you want those; skip it
+and the stock skill still works anonymised.
+
+### What this is, and what it isn't
+
+It is an **anonymisation tool, not a security boundary.** It runs as you, so an
+agent that deliberately set out to bypass it could — the hook matches command
+text, and text matching loses to enough creativity.
+
+What it does do is make sure the *normal* path never puts a real identifier in
+front of the model, and that is where leaks actually happen: a routine
+`vm.info -json` dumping every VM name, IP and annotation into the transcript
+because nobody thought about it. That failure mode is eliminated.
+
+If you need a hard boundary against a hostile agent, this is the wrong layer —
+run Claude Code as a separate unix user that genuinely cannot read the
+credentials, or don't give the agent vCenter access at all.
+
+### Verifying it
+
+Two scripts, testing two different things:
+
+```bash
+./wrapper/test-redaction.sh    # does anything leak?      (no install needed)
+./wrapper/test-deployment.sh   # is my setup correct?     (after setup.sh)
+```
+
+`test-redaction.sh` runs the whole permitted command surface against vcsim —
+including snapshots seeded with deliberately identifying names — and fails if any
+real identifier, IP, MAC or UUID survives, or if the allowlist stops behaving as
+specified. `test-deployment.sh` checks the things the engine test cannot: that
+`govc-safe` is on your PATH, that your shell is *not* exporting `GOVC_*`, that
+the creds file is 0600, that plain `govc` cannot authenticate from a clean
+environment, and that the hook actually denies direct `govc` and `rehydrate`.
+
+Limits, stated plainly: free text (annotations, snapshot descriptions, event
+messages) is **dropped**, not pseudonymised, because arbitrary prose cannot be
+safely rewritten. Structure still leaks by design — counts, cluster shape,
+guest-OS versions and ESXi build numbers survive, since removing them removes the
+point of the reports. And this protects data in transit to the model; it is not a
+substitute for a least-privilege vCenter role, which is what prevents unwanted
+changes.
+
 ## Repository layout
 
 | Path | Purpose |
 |---|---|
 | `govc/` | **The skill** — the only thing you need to copy |
+| `wrapper/` | Optional pseudonymising proxy, hooks, installer, and both test suites |
+| `wrapper/govc-private/` | Companion skill for token-space operation |
 | `test-windows.ps1` | Windows setup + smoke test against vcsim |
 | `test-unix.sh` | Linux/macOS setup + smoke test against vcsim (`--vcsim`) or a real vCenter |
 | `images/` | Screenshots |

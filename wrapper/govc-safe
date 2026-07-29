@@ -1,0 +1,726 @@
+#!/usr/bin/env python3
+"""
+govc-safe - pseudonymising proxy for the govc CLI.
+
+Runs govc with real credentials, then replaces every real identifier in the
+output with a stable token before printing. The caller (an LLM agent) only ever
+sees tokens: VM-0001, HOST-01, IP-0003.
+
+Design notes:
+  * Allowlist, not passthrough. Unknown verbs AND unknown flags are refused, so
+    a future govc flag cannot silently become an exfiltration channel.
+  * Learn-then-replace. Identifiers appear inside composite strings such as
+    "[LocalDS_0] MyVM/MyVM.vmx", so walking JSON keys is not sufficient. We
+    enumerate the inventory up front and substitute known names anywhere they
+    occur, then sweep for IP/IPv6/MAC/UUID/email/user patterns.
+  * Tokens are keyed on the vSphere MoRef where available, so they survive a
+    rename.
+
+Runs as you -- no service account, no sudo, no root install. It is an
+anonymisation tool, not a privilege boundary: an agent that deliberately worked
+around it could reach vCenter itself. What it does guarantee is that the normal
+path never puts a real identifier in front of the model.
+
+Credentials are read from a file (default ~/.config/govc-safe/creds, mode 0600)
+rather than the environment, so they are not inherited by the agent's shell and
+do not show up in `env`. They are never printed and never passed on a command
+line.
+"""
+
+import ipaddress
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+
+_HOME = os.path.expanduser("~")
+_CFG = os.environ.get("XDG_CONFIG_HOME") or os.path.join(_HOME, ".config")
+_DATA = os.environ.get("XDG_DATA_HOME") or os.path.join(_HOME, ".local", "share")
+CREDS_FILE = os.environ.get("GOVC_SAFE_CREDS", os.path.join(_CFG, "govc-safe", "creds"))
+MAP_DB = os.environ.get("GOVC_SAFE_MAP", os.path.join(_DATA, "govc-safe", "map.db"))
+GOVC = os.environ.get("GOVC_SAFE_GOVC", "govc")
+
+# --- policy ------------------------------------------------------------------
+
+# Refused on every verb, whatever the per-verb allowlist says. These are the
+# flags that turn govc into an exfiltration channel regardless of context.
+HARD_REFUSED_FLAGS = {
+    "-trace": "writes full SOAP bodies (including the login request and a live "
+              "session cookie) to stderr, which the caller captures",
+    "-verbose": "writes request/response summaries to stderr",
+    "-debug": "writes cleartext SOAP to disk",
+    "-dump": "emits a raw Go object dump that bypasses JSON-aware redaction",
+    "-xml": "emits raw XML that bypasses JSON-aware redaction",
+    "-password": "credentials must never appear on a command line",
+    "-u": "the connection URL is fixed by the wrapper",
+    "-k": "TLS behaviour is fixed by the wrapper",
+    "-cert": "TLS material is fixed by the wrapper",
+    "-key": "TLS material is fixed by the wrapper",
+    "-e": "prints extraConfig/guestinfo, which holds cloud-init secrets",
+}
+
+# Per-verb flag allowlist. Anything not listed here is refused.
+#
+# This replaces an earlier global denylist, which was wrong in both directions:
+# it let unknown flags through, and it blanket-refused -l/-f/-s/-i even where
+# they are harmless and necessary (`ls -l`, `snapshot.tree -f` means full path,
+# not follow). Arity is not tracked: only tokens beginning with "-" are
+# validated, so a flag's value is treated as a positional argument.
+_J = {"-json"}
+VERB_FLAGS = {
+    "about":                  _J | {"-l"},
+    "ls":                     _J | {"-l", "-t", "-L", "-dc"},
+    "find":                   _J | {"-type", "-name", "-maxdepth", "-i", "-l", "-p", "-dc"},
+    "tree":                   _J | {"-l", "-L", "-dc"},
+    "collect":                _J | {"-s", "-n", "-type", "-dc"},
+    "vm.info":                _J | {"-vm", "-r", "-t", "-g", "-dc"},   # never -e
+    "host.info":              _J | {"-host", "-dc"},
+    "datastore.info":         _J | {"-ds", "-dc"},
+    "datacenter.info":        _J | {"-dc"},
+    "cluster.usage":          _J | {"-dc"},
+    "pool.info":              _J | {"-p", "-dc"},
+    "snapshot.tree":          _J | {"-vm", "-f", "-s", "-D", "-i", "-c", "-dc"},
+    "metric.ls":              _J | {"-i", "-l", "-dc"},
+    "metric.sample":          _J | {"-n", "-i", "-t", "-instance", "-dc"},
+    "metric.info":            _J | {"-dc"},
+    "events":                 _J | {"-n", "-type", "-dc"},             # never -f
+    "tasks":                  _J | {"-n", "-dc"},                      # never -f
+    "alarms":                 _J | {"-n", "-dc"},
+    "vm.power":               {"-on", "-off", "-s", "-r", "-reset", "-suspend", "-force", "-vm", "-dc"},
+    "vm.migrate":             {"-host", "-ds", "-pool", "-folder", "-priority", "-dc"},
+    "snapshot.create":        {"-vm", "-d", "-m", "-q", "-dc"},
+    "snapshot.remove":        {"-vm", "-c", "-dc"},
+    "host.maintenance.enter": {"-host", "-timeout", "-evacuate", "-dc"},
+    "host.maintenance.exit":  {"-host", "-timeout", "-dc"},
+}
+ALLOWED_VERBS = set(VERB_FLAGS)
+
+# `find` filters on arbitrary object properties. Filtering does not print the
+# property, so the leak is only an oracle, but keep it to a curated set.
+FIND_FILTERS = {
+    "-runtime.powerState", "-runtime.connectionState", "-runtime.inMaintenanceMode",
+    "-runtime.consolidationNeeded", "-snapshot.currentSnapshot",
+    "-summary.overallStatus", "-config.template", "-config.guestId",
+    "-config.hardware.numCPU", "-config.hardware.memoryMB",
+}
+
+# `collect` reads an arbitrary property path and prints its value, so the verb
+# allowlist alone is not enough: `collect VM-0001 config.annotation` would print
+# free text straight through. Only these prefixes may be read.
+COLLECT_PROPS = (
+    "summary.runtime.", "summary.quickStats.", "summary.overallStatus",
+    "summary.config.numCpu", "summary.config.memorySizeMB",
+    "summary.config.vmPathName", "summary.hardware.",
+    "runtime.powerState", "runtime.connectionState", "runtime.inMaintenanceMode",
+    "runtime.consolidationNeeded", "runtime.bootTime",
+    "config.hardware.numCPU", "config.hardware.memoryMB", "config.template",
+    "config.guestId", "config.version",
+    "guest.guestState", "guest.toolsStatus", "guest.toolsRunningStatus",
+    "guest.guestFullName", "guest.hostName", "guest.ipAddress",
+    "overallStatus", "name",
+)
+
+REFUSED_VERBS = {
+    "guest.run": "returns arbitrary in-guest output, which cannot be redacted",
+    "guest.ps": "process command lines routinely contain passwords and tokens",
+    "guest.start": "arbitrary in-guest execution",
+    "guest.upload": "arbitrary in-guest file access",
+    "guest.download": "arbitrary in-guest file access",
+    "guest.df": "use datastore.info for capacity",
+    "host.esxcli": "unbounded host output including live socket tables",
+    "logs": "raw vCenter logs contain usernames, session IDs and client IPs",
+    "datastore.tail": "vmware.log contains hostnames, MACs and guest hostnames",
+    "datastore.download": "arbitrary file content",
+    "datastore.ls": "datastore file listings expose real VM folder names",
+    "permissions.ls": "principal names are PII",
+    "role.usage": "principal names are PII",
+    "fields.ls": "custom attribute values routinely contain owner names",
+    "env": "prints GOVC_PASSWORD in cleartext",
+    "about.cert": "certificate subject/SAN reveal the real vCenter FQDN",
+    "import.spec": "OVF properties include password-typed fields",
+}
+
+# JSON keys whose values are free prose or principals. Compared lower-cased,
+# because govc's JSON casing varies between structures.
+FREE_TEXT_KEYS = {
+    "annotation", "description", "fullformattedmessage", "message", "comments",
+    "notes", "value", "username", "user", "principal", "acknowledgedbyuser",
+    "changetag", "guestfamily", "loginname", "displayname",
+}
+
+STRUCTURAL_NAMES = {"", "vm", "host", "datastore", "network", "Resources", "datastore-cluster"}
+
+TYPE_PREFIX = {
+    "Datacenter": "DC", "VirtualMachine": "VM", "HostSystem": "HOST",
+    "ClusterComputeResource": "CLUSTER", "ComputeResource": "CLUSTER",
+    "Datastore": "DS", "StoragePod": "DSCLUSTER",
+    "Network": "NET", "OpaqueNetwork": "NET",
+    "DistributedVirtualPortgroup": "PG",
+    "DistributedVirtualSwitch": "DVS", "VmwareDistributedVirtualSwitch": "DVS",
+    "ResourcePool": "POOL", "VirtualApp": "VAPP", "Folder": "FOLDER",
+}
+
+TOKEN_RE = re.compile(r"\b(?:DC|VM|HOST|CLUSTER|DS|DSCLUSTER|NET|PG|DVS|POOL|VAPP|"
+                      r"FOLDER|SNAP|VMDIR|IP|IP6|MAC|UUID|USER|FQDN|MOREF|OBJ)-\d+\b")
+
+# A snapshot managed object reference, e.g. "snapshot-12052".
+SNAP_MOREF_RE = re.compile(r"^snapshot-\d+$")
+
+# Datastore file paths: "[LocalDS_0] MyVM/MyVM.vmx" and the relative form
+# "MyVM/vmware.log" that appears in the layout arrays.
+DS_PATH_RE = re.compile(r"(\[(?:DS|DSCLUSTER)-\d+\]\s+)([^\s\"',\]]+)")
+VM_FILE_RE = re.compile(r"\b([A-Za-z0-9_.\-]+)/([A-Za-z0-9_.\-]+"
+                        r"\.(?:vmx|vmdk|nvram|log|vmsd|vmsn|vswp|vmxf))\b")
+
+# Path stems that describe the file's role rather than the workload, and so
+# carry no identifying information.
+SAFE_PATH_STEM = re.compile(
+    r"^(?:vmware(?:-\d+)?|disk\d*|base|delta|flat|ctk|aux|hlog|rdm|vmx-\S*)$", re.I)
+
+FILE_EXT = {
+    "vmx", "vmdk", "nvram", "log", "iso", "ovf", "ova", "json", "txt", "xml",
+    "vswp", "vmsd", "vmsn", "lck", "cfg", "md", "csv", "html", "tar", "gz", "zip",
+}
+
+
+class Refused(Exception):
+    pass
+
+
+# --- token store -------------------------------------------------------------
+
+class TokenMap:
+    """Stable real-value -> token mapping, persisted locally."""
+
+    def __init__(self, path):
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        new = not os.path.exists(path)
+        self.db = sqlite3.connect(path, timeout=30, isolation_level=None)
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS tok ("
+            " kind TEXT NOT NULL, real TEXT NOT NULL, token TEXT NOT NULL,"
+            " PRIMARY KEY (kind, real))"
+        )
+        self.db.execute("CREATE INDEX IF NOT EXISTS tok_token ON tok(token)")
+        # One counter per kind, bumped inside the same write transaction that
+        # inserts the row. COUNT(*)+1 outside a transaction let two concurrent
+        # runs mint the same token for different values.
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS seq (kind TEXT PRIMARY KEY, n INTEGER NOT NULL)")
+        if new:
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+
+    def token_for(self, kind, real):
+        real = str(real)
+        row = self.db.execute(
+            "SELECT token FROM tok WHERE kind=? AND real=?", (kind, real)).fetchone()
+        if row:
+            return row[0]
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.db.execute(
+                "SELECT token FROM tok WHERE kind=? AND real=?", (kind, real)).fetchone()
+            if row:                       # another process won the race
+                self.db.execute("COMMIT")
+                return row[0]
+            self.db.execute(
+                "INSERT INTO seq (kind, n) VALUES (?, 1) "
+                "ON CONFLICT(kind) DO UPDATE SET n = n + 1", (kind,))
+            n = self.db.execute("SELECT n FROM seq WHERE kind=?", (kind,)).fetchone()[0]
+            width = 4 if kind in ("VM", "IP", "IP6", "UUID") else 2
+            token = "%s-%0*d" % (kind, width, n)
+            self.db.execute("INSERT INTO tok (kind, real, token) VALUES (?,?,?)",
+                            (kind, real, token))
+            self.db.execute("COMMIT")
+            return token
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
+
+    def add_alias(self, kind, real, token):
+        self.db.execute(
+            "INSERT OR IGNORE INTO tok (kind, real, token) VALUES (?,?,?)",
+            (kind, real, token))
+
+    def lookup(self, kind, token):
+        row = self.db.execute(
+            "SELECT real FROM tok WHERE token=? AND kind=?", (token, kind)).fetchone()
+        return row[0] if row else None
+
+    def real_for(self, token):
+        row = self.db.execute(
+            "SELECT real FROM tok WHERE token=?", (token,)).fetchone()
+        return row[0] if row else None
+
+    def stats(self):
+        return self.db.execute(
+            "SELECT kind, COUNT(*) FROM tok GROUP BY kind ORDER BY kind").fetchall()
+
+
+# --- govc execution ----------------------------------------------------------
+
+def load_creds():
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "HOME": _HOME,          # govc caches its session in ~/.govmomi
+    }
+    if os.path.exists(CREDS_FILE):
+        with open(CREDS_FILE) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[7:]
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip().startswith("GOVC_"):
+                    env[k.strip()] = v.strip().strip("'\"")
+    else:
+        # Development fallback so the engine can be exercised without the
+        # privileged install. Not relied on in the enforced deployment.
+        for k, v in os.environ.items():
+            if k.startswith("GOVC_"):
+                env[k] = v
+    if not env.get("GOVC_URL"):
+        raise Refused("no GOVC_URL configured; run wrapper/setup.sh")
+    return env
+
+
+def run_govc(args, env):
+    proc = subprocess.run([GOVC] + args, capture_output=True, text=True, env=env)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+# --- learning the inventory --------------------------------------------------
+
+def learn_inventory(env, tmap):
+    """Enumerate managed objects so their names can be tokenised on sight."""
+    rc, out, err = run_govc(["find", "-l", "-i", "/"], env)
+    if rc != 0:
+        raise Refused("inventory enumeration failed: %s" % scrub_error(err, tmap))
+
+    for line in out.splitlines():
+        parts = line.rstrip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        typemoref, path = parts[0], parts[1].strip()
+        objtype, _, moref = typemoref.partition(":")
+        name = path.rstrip("/").split("/")[-1]
+        if name in STRUCTURAL_NAMES:
+            continue
+        token = tmap.token_for(TYPE_PREFIX.get(objtype, "OBJ"), moref or name)
+        tmap.add_alias("_name", name, token)
+        if moref:
+            tmap.add_alias("_moref", moref, token)
+        # Used only to resolve a token back into an unambiguous argument.
+        # Deliberately excluded from the redaction alternation so paths are
+        # still tokenised segment by segment.
+        tmap.add_alias("_path", path, token)
+
+    learn_snapshots(env, tmap)
+
+
+def learn_snapshots(env, tmap):
+    """Tokenise snapshot names, which `govc find` does not enumerate.
+
+    Snapshots are not inventory objects, so they never appear in the pass above
+    and their names are not in the substitution map. They are also not dropped
+    as free text, because "name" must stay tokenisable for VMs and hosts. Left
+    alone they leak verbatim -- and snapshot names are among the worst offenders
+    in practice ("before ACME-Corp migration", "ticket INC-4471").
+
+    Keyed on the snapshot MoRef so the token is stable, and so a SNAP token
+    resolves back to an unambiguous identifier rather than a repeatable name.
+    """
+    rc, out, _ = run_govc(
+        ["find", "/", "-type", "m", "-snapshot.currentSnapshot", "*"], env)
+    paths = [p for p in out.splitlines() if p.strip()]
+    if rc != 0 or not paths:
+        return
+    rc, out, _ = run_govc(["vm.info", "-json"] + paths, env)
+    if rc != 0:
+        return
+    try:
+        doc = json.loads(out)
+    except ValueError:
+        return
+
+    def walk(nodes):
+        for n in nodes or []:
+            moref = (n.get("snapshot") or {}).get("value")
+            if moref:
+                token = tmap.token_for("SNAP", moref)
+                tmap.add_alias("_moref", moref, token)
+                name = n.get("name")
+                if name and name.strip():
+                    tmap.add_alias("_name", name, token)
+            walk(n.get("childSnapshotList"))
+
+    for vm in doc.get("virtualMachines") or []:
+        walk((vm.get("snapshot") or {}).get("rootSnapshotList"))
+
+
+# --- redaction ---------------------------------------------------------------
+
+IP4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+IP6_RE = re.compile(r"(?<![0-9A-Za-z:])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}"
+                    r"(?:%[0-9A-Za-z]+)?(?![0-9A-Za-z:])")
+MAC_RE = re.compile(r"\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b")
+UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+WINUSER_RE = re.compile(r"\b[A-Za-z0-9_-]+\\[A-Za-z0-9._-]+")
+FQDN_RE = re.compile(r"\b[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+\b")
+
+
+def build_name_pattern(tmap):
+    """One alternation over all known names, longest first.
+
+    Longest-first matters: a VM named "DC0_H0_VM0" must be replaced before a
+    datacenter named "DC0", or "_H0_VM0" would be left behind.
+    """
+    rows = tmap.db.execute(
+        "SELECT real, token FROM tok WHERE kind IN ('_name','_moref')").fetchall()
+    if not rows:
+        return None, {}
+    lookup = {r: t for r, t in rows}
+    names = sorted(lookup, key=len, reverse=True)
+    return re.compile("|".join(re.escape(n) for n in names)), lookup
+
+
+def redact_text(text, tmap):
+    if not text:
+        return text
+
+    pattern, lookup = build_name_pattern(tmap)
+    if pattern:
+        text = pattern.sub(lambda m: lookup[m.group(0)], text)
+
+    # After known names, before the generic sweeps: catches stale names that
+    # survive only inside datastore paths.
+    text = tokenise_paths(text, tmap)
+
+    text = UUID_RE.sub(lambda m: tmap.token_for("UUID", m.group(0).lower()), text)
+    # MAC before IPv6: a MAC is colon-separated hex and would otherwise be
+    # offered to the IPv6 matcher.
+    text = MAC_RE.sub(lambda m: tmap.token_for("MAC", m.group(0).lower()), text)
+    text = EMAIL_RE.sub(lambda m: tmap.token_for("USER", m.group(0).lower()), text)
+    text = WINUSER_RE.sub(lambda m: tmap.token_for("USER", m.group(0).lower()), text)
+
+    def ip6_sub(m):
+        s = m.group(0)
+        try:
+            ipaddress.ip_address(s.split("%")[0])
+        except ValueError:
+            return s          # a timestamp, a version, anything else
+        return tmap.token_for("IP6", s.lower())
+    text = IP6_RE.sub(ip6_sub, text)
+
+    def ip4_sub(m):
+        try:
+            ipaddress.ip_address(m.group(0))
+        except ValueError:
+            return m.group(0)  # e.g. driver version "10.2.309.8"
+        return tmap.token_for("IP", m.group(0))
+    text = IP4_RE.sub(ip4_sub, text)
+
+    def fqdn_sub(m):
+        s = m.group(0)
+        head, _, ext = s.rpartition(".")
+        # Keep only a derived filename such as "VM-0001.vmx": the stem must be
+        # exactly one token. Previously any FQDN *containing* a token-shaped
+        # label was skipped, so a real host "VM-0001.prod.example.com" leaked.
+        if ext.lower() in FILE_EXT and TOKEN_RE.fullmatch(head):
+            return s
+        if ext.lower() in FILE_EXT or not re.match(r"^[A-Za-z]", ext):
+            return s
+        return tmap.token_for("FQDN", s.lower())
+    text = FQDN_RE.sub(fqdn_sub, text)
+
+    return text
+
+
+def tokenise_paths(text, tmap):
+    """Tokenise datastore path components.
+
+    A VM's folder on the datastore keeps the name the VM had when it was
+    created, so a renamed VM leaks its ORIGINAL name through vmPathName,
+    logDirectory and the layout arrays -- and that old name is not in the
+    inventory map, which only holds current display names. Rename
+    "ACME-PROD-SQL01" to anything and the path still says ACME-PROD-SQL01.
+
+    The datastore itself is already a token and stays; only the segments below
+    it are rewritten. File extensions are preserved so the file's role is still
+    readable, as are role-describing stems like "vmware.log" and "disk1.vmdk".
+    """
+    def seg(s):
+        if not s or TOKEN_RE.fullmatch(s):
+            return s
+        stem, dot, ext = s.rpartition(".")
+        if not dot:
+            stem, ext = s, ""
+        if TOKEN_RE.fullmatch(stem) or SAFE_PATH_STEM.match(stem):
+            return s
+        return tmap.token_for("VMDIR", stem) + (("." + ext) if ext else "")
+
+    def path(p):
+        return "/".join(seg(x) for x in p.split("/"))
+
+    text = DS_PATH_RE.sub(lambda m: m.group(1) + path(m.group(2)), text)
+    text = VM_FILE_RE.sub(lambda m: seg(m.group(1)) + "/" + seg(m.group(2)), text)
+    return text
+
+
+def drop_free_text(obj):
+    """Blank prose and principal fields; they cannot be pseudonymised."""
+    if isinstance(obj, dict):
+        return {
+            k: ("[redacted: free text]"
+                if k.lower() in FREE_TEXT_KEYS and isinstance(v, str) and v.strip()
+                else drop_free_text(v))
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [drop_free_text(v) for v in obj]
+    return obj
+
+
+def parse_json_stream(out):
+    """Parse one JSON document, or a stream of them.
+
+    `govc events -json` and `tasks -json` emit newline-delimited objects, not a
+    single document. A plain json.loads() raises on those, which previously sent
+    the output down the plain-text path and silently skipped free-text dropping.
+    """
+    s = out.strip()
+    if not s or s[0] not in "[{":
+        return None
+    dec = json.JSONDecoder()
+    objs, i = [], 0
+    while i < len(s):
+        while i < len(s) and s[i].isspace():
+            i += 1
+        if i >= len(s):
+            break
+        try:
+            obj, i = dec.raw_decode(s, i)
+        except ValueError:
+            return None
+        objs.append(obj)
+    return objs or None
+
+
+def redact_output(out, tmap):
+    objs = parse_json_stream(out)
+    if objs is None:
+        return redact_text(out, tmap)
+    cleaned = [drop_free_text(o) for o in objs]
+    body = "\n".join(json.dumps(o, indent=2) for o in cleaned)
+    return redact_text(body, tmap) + "\n"
+
+
+def scrub_error(err, tmap=None):
+    """govc echoes resolved real names back on failure, so stderr needs the
+    same redactor as stdout, not just a URL strip."""
+    if not err:
+        return ""
+    first = err.strip().splitlines()[0] if err.strip() else ""
+    first = re.sub(r"https?://\S+", "[vcenter-url]", first)
+    if tmap is not None:
+        first = redact_text(first, tmap)
+    return first[:200]
+
+
+# --- argument handling -------------------------------------------------------
+
+def resolve_tokens(args, tmap):
+    """Map tokens in arguments back to real values before calling govc."""
+    out = []
+    for a in args:
+        stripped = a.strip()
+        if TOKEN_RE.fullmatch(stripped):
+            # The whole argument is one token: prefer the full inventory path,
+            # then the MoRef. Snapshots have no path, and their names repeat
+            # within a tree, so a SNAP token must resolve to snapshot-NNNNN.
+            real = (tmap.lookup("_path", stripped) or tmap.lookup("_moref", stripped)
+                    or tmap.lookup("_name", stripped) or tmap.real_for(stripped))
+            if real is None:
+                raise Refused("unknown token %s" % stripped)
+            out.append(real)
+            continue
+
+        # Tokens embedded in a larger string, e.g. an already-tokenised path
+        # "/DC-01/vm/VM-0001" fed back from a previous call. Substituting the
+        # full path for each segment would produce "//DC0/vm//DC0/vm/RealVM",
+        # so use display names and leave the surrounding structure intact.
+        def name_only(m):
+            real = tmap.lookup("_name", m.group(0)) or tmap.real_for(m.group(0))
+            if real is None:
+                raise Refused("unknown token %s" % m.group(0))
+            return real
+        out.append(TOKEN_RE.sub(name_only, a))
+    return out
+
+
+def check_policy(args):
+    if not args:
+        raise Refused("no command given")
+    verb = args[0]
+
+    if verb in REFUSED_VERBS:
+        raise Refused("'%s' is not available: %s" % (verb, REFUSED_VERBS[verb]))
+    if verb.startswith(("guest.", "sso.", "session.")):
+        raise Refused("'%s' is not available: guest/directory/session access "
+                      "cannot be redacted" % verb)
+    if verb not in ALLOWED_VERBS:
+        raise Refused("'%s' is not on the allowlist. Available: %s"
+                      % (verb, ", ".join(sorted(ALLOWED_VERBS))))
+
+    allowed = VERB_FLAGS[verb]
+    positional = []
+    for a in args[1:]:
+        if not a.startswith("-") or a == "-":
+            positional.append(a)
+            continue
+        if a == "--":
+            continue
+        flag = a.split("=", 1)[0]
+        if flag in HARD_REFUSED_FLAGS:
+            raise Refused("flag '%s' is not permitted: %s"
+                          % (flag, HARD_REFUSED_FLAGS[flag]))
+        if flag in allowed:
+            continue
+        if verb == "find" and flag in FIND_FILTERS:
+            continue
+        raise Refused(
+            "flag '%s' is not permitted for '%s'. Allowed here: %s"
+            % (flag, verb, " ".join(sorted(allowed))))
+
+    # Snapshot deletion must name exactly one snapshot, and must still name the
+    # same one it named at audit time.
+    #
+    # govc does fail safe on a duplicate name ("dup" resolves to 2 snapshots,
+    # nothing removed), so this is not about silent mis-deletion. It is about
+    # stable identity: a name that resolves uniquely during the audit can
+    # resolve to something else by the time the operator approves, and '*'
+    # deletes the entire tree in one call. The MoRef is immutable.
+    if verb == "snapshot.remove":
+        targets = [p for p in positional if p not in ("-",)]
+        if not targets:
+            raise Refused("snapshot.remove needs a snapshot to remove")
+        for t in targets:
+            if t == "*":
+                raise Refused(
+                    "'*' would remove every snapshot on the VM in one call and "
+                    "is not permitted. Remove them one at a time by SNAP token, "
+                    "listing each for the operator first.")
+            if not (TOKEN_RE.fullmatch(t.strip()) or SNAP_MOREF_RE.match(t.strip())):
+                # Deliberately does not echo the argument: a refusal must never
+                # be a channel for putting a real name into the caller's output.
+                raise Refused(
+                    "that is not an unambiguous snapshot identifier. Remove by "
+                    "the SNAP token from `snapshot.tree -vm <VM> -i`, not by "
+                    "name: snapshot names repeat within a tree and can change "
+                    "meaning between the audit and the removal.")
+
+    # `collect` prints the value of an arbitrary property path, so the verb
+    # allowlist alone would let `collect VM-0001 config.annotation` through.
+    if verb == "collect":
+        for p in positional:
+            if p.startswith(("/", "./")) or TOKEN_RE.fullmatch(p.strip()):
+                continue          # an object path, not a property
+            if not p.startswith(COLLECT_PROPS):
+                raise Refused(
+                    "property '%s' is not readable through the wrapper: only "
+                    "non-free-text properties are permitted. Allowed prefixes: %s"
+                    % (p, ", ".join(sorted(set(COLLECT_PROPS)))))
+    return verb
+
+
+# --- entry points ------------------------------------------------------------
+
+def cmd_run(argv):
+    verb = check_policy(argv)
+    env = load_creds()
+    tmap = TokenMap(MAP_DB)
+    learn_inventory(env, tmap)
+
+    args = resolve_tokens(argv, tmap)
+    if verb in ("events", "tasks") and "-json" not in args:
+        args.append("-json")
+
+    rc, out, err = run_govc(args, env)
+    sys.stdout.write(redact_output(out, tmap))
+    if err.strip():
+        sys.stderr.write(scrub_error(err, tmap) + "\n")
+    return rc
+
+
+def cmd_rehydrate(argv):
+    """Map tokens back to real names. For you, not for the agent.
+
+    There is no privilege boundary here -- the hook is what keeps an agent from
+    running this and pulling every real name into the transcript.
+    """
+    text = open(argv[0]).read() if argv else sys.stdin.read()
+    tmap = TokenMap(MAP_DB)
+    # Resolve to the bare display name, never the full inventory path: the token
+    # already sits inside a path in the report, so substituting "/DC0/vm/MyVM"
+    # for "VM-0001" in "/DC-01/vm/VM-0001" would duplicate the prefix.
+    best = {}
+    for kinds in (("_name",), None, ("_moref",)):
+        if kinds is None:
+            rows = tmap.db.execute(
+                "SELECT token, real FROM tok "
+                "WHERE kind NOT IN ('_name','_moref','_path')").fetchall()
+        else:
+            rows = tmap.db.execute(
+                "SELECT token, real FROM tok WHERE kind=?", kinds).fetchall()
+        for token, real in rows:
+            best.setdefault(token, real)
+    sys.stdout.write(TOKEN_RE.sub(lambda m: best.get(m.group(0), m.group(0)), text))
+    return 0
+
+
+def cmd_map_stats(_argv):
+    tmap = TokenMap(MAP_DB)
+    for kind, n in tmap.stats():
+        if not kind.startswith("_"):
+            print("%-12s %d" % (kind, n))
+    return 0
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        print("\nusage: govc-safe <govc-verb> [args...]")
+        print("       govc-safe rehydrate [file]   (you, not the agent)")
+        print("       govc-safe map-stats")
+        return 0
+    try:
+        if argv[0] == "rehydrate":
+            return cmd_rehydrate(argv[1:])
+        if argv[0] == "map-stats":
+            return cmd_map_stats(argv[1:])
+        if argv[0] == "run":
+            argv = argv[1:]
+        return cmd_run(argv)
+    except Refused as e:
+        sys.stderr.write("govc-safe: refused: %s\n" % e)
+        return 2
+    except BrokenPipeError:
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
