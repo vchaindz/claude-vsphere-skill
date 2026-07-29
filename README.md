@@ -170,13 +170,17 @@ Battle-tested details baked in from real-world runs: PowerShell splits unquoted 
 
 Every reference file is cross-platform: bash examples work on Linux, macOS, WSL, and Git Bash, and each command that behaves differently under native PowerShell carries a `powershell` twin. Batch pipelines use `tr '\n' '\0' | xargs -0` rather than the GNU-only `xargs -d '\n'`, so they run unmodified on macOS and survive VM names containing spaces.
 
-## Keeping real identifiers away from the model
+## Optional: keeping real identifiers away from the model
+
+> **Entirely optional.** Everything above works on its own. Skip this section
+> unless your vSphere data must not reach a model provider — nothing in the
+> `govc/` skill depends on it.
 
 By default this skill runs `govc` through the agent's shell, so **raw output —
 VM names, IPs, MACs, usernames in events, guest OS versions — becomes part of the
 conversation** and is sent to whichever model provider you use.
 
-If that is not acceptable, `wrapper/` contains an optional pseudonymising proxy.
+If that is not acceptable, `wrapper/` contains a pseudonymising proxy.
 `govc-safe` holds the credentials, runs the real command, and rewrites every
 identifier to a stable token before anything is printed:
 
@@ -205,7 +209,9 @@ substituted locally, on your screen, after the response comes back. `/verbose`
 shows the untouched text if you want to confirm exactly what left the machine.
 For a cleartext copy on disk, `govc-safe rehydrate report.tsv`.
 
-Setup is per-user, no root:
+### Enabling it
+
+Two steps. First, install — per-user, no root:
 
 ```bash
 ./wrapper/setup.sh          # installs govc-safe + the hook to ~/.local/bin
@@ -214,8 +220,57 @@ Setup is per-user, no root:
 It stores your vCenter credentials in `~/.config/govc-safe/creds` (0600) instead
 of your shell profile. That matters: Claude Code inherits the environment it is
 launched from, so `export GOVC_PASSWORD=...` in `.zshrc` hands the agent working
-credentials and makes the wrapper optional. With the credentials in a file the
-wrapper reads, the natural path to vCenter is the wrapper — which anonymises.
+credentials and bypasses the wrapper entirely. Remove those exports — the
+wrapper reads the file instead.
+
+Second, register the hooks. **Nothing is active until you do this** —
+`setup.sh` prints the block but deliberately does not edit your settings. Add it
+to `~/.claude/settings.json` (all projects) or `.claude/settings.json` (one
+repository), replacing `<HOME>` with your home directory:
+
+```json
+{
+  "permissions": {
+    "deny": ["Bash(*GOVC_PASSWORD*)"]
+  },
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "<HOME>/.local/bin/govc-guard.py" }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "<HOME>/.local/bin/govc-guard.py" }] }
+    ],
+    "MessageDisplay": [
+      { "hooks": [{ "type": "command", "command": "<HOME>/.local/bin/govc-guard.py" }] }
+    ]
+  }
+}
+```
+
+One script, three events:
+
+| Event | What it does |
+|---|---|
+| `PreToolUse` | Rewrites `govc …` → `govc-safe …` before the command runs, so the stock skill needs no changes. Also refuses `rehydrate` and reads of the creds file. |
+| `PostToolUse` | Backstop: scrubs IPs, MACs, UUIDs and emails from *any* command's output, not just govc. |
+| `MessageDisplay` | Rehydrates replies on your screen only, so you read real names while the model keeps tokens. |
+
+`MessageDisplay` has no `matcher` — that event does not support one.
+
+There is deliberately **no `"Bash(govc:*)"` deny rule**: deny rules are evaluated
+regardless of what a hook returns, so it would block the very command
+`PreToolUse` is redirecting.
+
+Then confirm it took:
+
+```bash
+./wrapper/test-deployment.sh
+```
+
+It warns if the hooks are not referenced in a settings file, if your environment
+still exports `GOVC_*`, or if the creds file has the wrong mode.
 
 **The skill needs no changes.** A `PreToolUse` hook rewrites `govc …` into
 `govc-safe …` before the command runs — including every invocation in a
