@@ -1,0 +1,41 @@
+# Packaged skill bundle (built artifact, not source)
+govc.skill
+
+# Binaries / archives if downloaded into the repo directory.
+# NOTE: deliberately no bare "govc" entry — that would also ignore the govc/ skill folder.
+/govc.exe
+/vcsim
+/vcsim.exe
+*.tar.gz
+*.zip
+
+# Credentials and local environment — never commit these
+.env
+.env.*
+*.pem
+*.key
+*.crt
+.govc_ca.crt
+.govc_known_hosts
+
+# Artifacts produced by the documented workflows
+spec.json
+*.log
+/export-dir/
+/debug/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+desktop.ini
