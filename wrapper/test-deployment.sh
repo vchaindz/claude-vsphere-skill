@@ -20,6 +20,9 @@ ok()   { echo "[PASS] $1"; pass=$((pass+1)); }
 bad()  { echo "[FAIL] $1"; fail=$((fail+1)); }
 note() { echo "[WARN] $1"; warn=$((warn+1)); }
 must_fail() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$d (succeeded, expected refusal)"; else ok "$d"; fi; }
+
+# GNU stat uses -c, BSD/macOS stat uses -f. Try both.
+mode_of() { stat -c "%a" "$1" 2>/dev/null || stat -f "%Lp" "$1" 2>/dev/null || echo "?"; }
 must_work() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "$d (failed, expected success)"; fi; }
 
 echo "--- installed ---"
@@ -39,12 +42,12 @@ else
     ok "no GOVC_* exported - the agent inherits nothing"
 fi
 [ -f "$CREDS" ] && ok "creds file present" || bad "no creds file at $CREDS"
-m=$(stat -c "%a" "$CREDS" 2>/dev/null || echo "?")
+m=$(mode_of "$CREDS")
 [ "$m" = "600" ] && ok "creds mode 0600" || bad "creds mode $m (want 0600)"
-m=$(stat -c "%a" "$DATA_DIR" 2>/dev/null || echo "?")
+m=$(mode_of "$DATA_DIR")
 [ "$m" = "700" ] && ok "token map dir mode 0700" || note "token map dir mode $m (want 0700)"
 must_fail "plain govc cannot authenticate from a clean env" \
-    env -u GOVC_URL -u GOVC_USERNAME -u GOVC_PASSWORD -u GOVC_INSECURE govc about
+    sh -c 'unset GOVC_URL GOVC_USERNAME GOVC_PASSWORD GOVC_INSECURE; govc about' 
 
 echo
 echo "--- the wrapper works ---"
@@ -109,9 +112,38 @@ if [ -x "$HOOK" ]; then
     else
         note "MessageDisplay produced no rewrite (empty token map?)"
     fi
-    grep -rqs "govc-guard" "$HOME/.claude/settings.json" .claude/settings.json 2>/dev/null \
-        && ok "hook referenced in a settings.json" \
-        || note "hook not wired into settings.json yet - add the block setup.sh printed"
+    wired=0
+    for sf in "$HOME/.claude/settings.json" ".claude/settings.json"; do
+        [ -f "$sf" ] || continue
+        if python3 "$(dirname "$0")/settings-merge.py" --check "$sf" >/dev/null 2>&1; then
+            ok "all three hooks wired in $sf"; wired=1; break
+        fi
+    done
+    if [ "$wired" -eq 0 ]; then
+        bad "hooks not wired into any settings.json - run ./setup.sh"
+        for sf in "$HOME/.claude/settings.json" ".claude/settings.json"; do
+            [ -f "$sf" ] && python3 "$(dirname "$0")/settings-merge.py" --check "$sf" 2>/dev/null | sed 's/^/       /'
+        done
+    fi
+
+    # A stale path is the failure mode after BIN_DIR changes: the entry is
+    # present, so a grep-based check passes, but the file is gone.
+    for sf in "$HOME/.claude/settings.json" ".claude/settings.json"; do
+        [ -f "$sf" ] || continue
+        python3 - "$sf" <<'EOF' || true
+import json,os,sys
+d=json.load(open(sys.argv[1]))
+seen=set()
+for ev,groups in (d.get("hooks") or {}).items():
+    for g in groups if isinstance(groups,list) else []:
+        for h in (g.get("hooks") or []) if isinstance(g,dict) else []:
+            c=h.get("command","")
+            if "govc-guard" in c and c not in seen:
+                seen.add(c)
+                print(("[PASS] wired hook exists: " if os.path.exists(c)
+                       else "[FAIL] wired hook MISSING on disk: ")+c)
+EOF
+    done
 else
     note "hook not installed next to govc-safe"
 fi

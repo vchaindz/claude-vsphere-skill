@@ -34,6 +34,7 @@ Install: see wrapper/setup.sh, which prints the settings.json entries.
 import ipaddress
 import json
 import os
+import pathlib
 import re
 import sqlite3
 import sys
@@ -55,12 +56,18 @@ MAP_DB = os.environ.get("GOVC_SAFE_MAP", os.path.join(_DATA, "govc-safe", "map.d
 # Matches `govc`, `./govc`, `/usr/local/bin/govc`, `command govc` -- but never
 # `govc-safe` or `govc-rehydrate`. Rewritten rather than denied, so a skill that
 # documents plain `govc` keeps working untouched.
-GOVC_CALL_RE = re.compile(r"(?<![\w/.-])(?:[\w./-]*/)?govc(?![\w-])")
+GOVC_CALL_RE = re.compile(
+    r"(?<![\w/.\\-])"                 # not mid-word, mid-path or after a dot
+    r"(?:[A-Za-z]:)?"                 # optional Windows drive letter
+    r"(?:[\w.\\/-]*[\\/])?"           # optional directory prefix, / or \\
+    r"govc(?:\.exe)?"                 # the binary, with or without .exe
+    r"(?![\w.-])")                    # not govc-safe, govc-rehydrate, govc.foo
 
 # Commands that must never run: they would de-anonymise or expose credentials.
 DENY_PATTERNS = [
-    (re.compile(r"\bgovc-safe\s+rehydrate\b|"
-                r"(?<![\w/.-])(?:[\w./-]*/)?govc-rehydrate(?![\w-])"),
+    (re.compile(r"\bgovc-safe(?:\.exe)?\s+rehydrate\b|"
+                r"(?<![\w/.\\-])(?:[A-Za-z]:)?(?:[\w.\\/-]*[\\/])?"
+                r"govc-rehydrate(?:\.exe)?(?![\w.-])"),
      "Rehydration maps tokens back to real names and is for the operator, not "
      "for you -- running it would pull every real identifier into this "
      "transcript, defeating the wrapper. Hand over the tokenised report and "
@@ -199,7 +206,12 @@ def handle_display(ev):
     if not found or not os.path.exists(MAP_DB):
         sys.exit(0)
     try:
-        db = sqlite3.connect("file:%s?mode=ro" % MAP_DB, uri=True, timeout=2)
+        # as_uri() rather than %-formatting: a Windows path is backslashed and
+        # a username with a space or a '#' silently breaks URI parsing -- and
+        # the except below would swallow it, leaving rehydration mysteriously
+        # dead.
+        uri = pathlib.Path(MAP_DB).absolute().as_uri() + "?mode=ro"
+        db = sqlite3.connect(uri, uri=True, timeout=2)
         # Prefer the display name; fall back to any other kind (IP, MAC, ...).
         # '_path'/'_moref' exist only for argument resolution and would splice a
         # full inventory path into the middle of an already-pathed token.
@@ -207,7 +219,7 @@ def handle_display(ev):
         rows = db.execute(
             "SELECT token, real, kind FROM tok WHERE token IN (%s) "
             "AND kind NOT IN ('_path','_moref')" % q, tuple(found)).fetchall()
-    except sqlite3.Error:
+    except (sqlite3.Error, ValueError, OSError):
         sys.exit(0)                      # fail open: original text is shown
     best = {}
     for token, real, kind in rows:

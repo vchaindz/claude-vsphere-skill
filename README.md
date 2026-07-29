@@ -223,31 +223,72 @@ launched from, so `export GOVC_PASSWORD=...` in `.zshrc` hands the agent working
 credentials and bypasses the wrapper entirely. Remove those exports — the
 wrapper reads the file instead.
 
-Second, register the hooks. **Nothing is active until you do this** —
-`setup.sh` prints the block but deliberately does not edit your settings. Add it
-to `~/.claude/settings.json` (all projects) or `.claude/settings.json` (one
-repository), replacing `<HOME>` with your home directory:
+Second — nothing else. `setup.sh` wires the three hooks into
+`~/.claude/settings.json` for you, then tells you to restart Claude Code.
+
+It **merges** rather than overwrites: your existing hooks, matcher groups and
+deny rules are preserved, an existing `matcher: "Bash"` group is reused rather
+than duplicated, and re-running converges instead of accumulating. The original
+is backed up to `settings.json.bak.<timestamp>` first, and a malformed settings
+file aborts the install rather than being truncated.
+
+> ### ⚠️ Back up `settings.json` yourself first
+>
+> **Any program that edits your settings file is a risk, this one included.**
+> `settings.json` is hand-edited, shared with every other tool you have wired in,
+> and has no schema anyone can validate against — so a merge is always an
+> informed guess about a structure someone else owns.
+>
+> ```bash
+> cp ~/.claude/settings.json ~/settings.json.mine    # do this first
+> ```
+>
+> The installer does take its own timestamped backup next to the original, and
+> the merge is tested against a real settings file with pre-existing hooks. But
+> the automatic backup lives in the same directory as the file it protects and is
+> written by the same code you are trusting. Keep your own copy somewhere else.
+>
+> If anything looks wrong afterwards, restore and tell us what your file looked
+> like:
+>
+> ```bash
+> cp ~/settings.json.mine ~/.claude/settings.json    # or the .bak.<timestamp>
+> ```
+>
+> Prefer to stay in control? `--no-settings` installs everything and touches
+> nothing; the block it would have written is shown below, and
+> `./wrapper/uninstall.sh` removes only its own entries.
+
+```bash
+./wrapper/setup.sh --project      # wire ./.claude/settings.json instead
+./wrapper/setup.sh --yes          # non-interactive; credentials from the environment
+./wrapper/setup.sh --no-settings  # install only, wire nothing
+./wrapper/uninstall.sh            # reverse it; prompts before the sensitive files
+```
+
+<details>
+<summary>What it writes to settings.json</summary>
 
 ```json
 {
-  "permissions": {
-    "deny": ["Bash(*GOVC_PASSWORD*)"]
-  },
+  "permissions": { "deny": ["Bash(*GOVC_PASSWORD*)"] },
   "hooks": {
-    "PreToolUse": [
-      { "matcher": "Bash",
-        "hooks": [{ "type": "command", "command": "<HOME>/.local/bin/govc-guard.py" }] }
-    ],
-    "PostToolUse": [
-      { "matcher": "Bash",
-        "hooks": [{ "type": "command", "command": "<HOME>/.local/bin/govc-guard.py" }] }
-    ],
+    "PreToolUse":  [{ "matcher": "Bash",
+      "hooks": [{ "type": "command", "command": "~/.local/bin/govc-guard.py" }] }],
+    "PostToolUse": [{ "matcher": "Bash",
+      "hooks": [{ "type": "command", "command": "~/.local/bin/govc-guard.py" }] }],
     "MessageDisplay": [
-      { "hooks": [{ "type": "command", "command": "<HOME>/.local/bin/govc-guard.py" }] }
-    ]
+      { "hooks": [{ "type": "command", "command": "~/.local/bin/govc-guard.py" }] }]
   }
 }
 ```
+
+`MessageDisplay` carries no `matcher` — that event does not support one. And
+there is deliberately **no `"Bash(govc:*)"` deny rule**: deny rules are evaluated
+regardless of what a hook returns, so it would block the very command
+`PreToolUse` is rewriting. The installer refuses to proceed if it finds one.
+
+</details>
 
 One script, three events:
 
@@ -257,20 +298,19 @@ One script, three events:
 | `PostToolUse` | Backstop: scrubs IPs, MACs, UUIDs and emails from *any* command's output, not just govc. |
 | `MessageDisplay` | Rehydrates replies on your screen only, so you read real names while the model keeps tokens. |
 
-`MessageDisplay` has no `matcher` — that event does not support one.
-
-There is deliberately **no `"Bash(govc:*)"` deny rule**: deny rules are evaluated
-regardless of what a hook returns, so it would block the very command
-`PreToolUse` is redirecting.
-
 Then confirm it took:
 
 ```bash
 ./wrapper/test-deployment.sh
 ```
 
-It warns if the hooks are not referenced in a settings file, if your environment
-still exports `GOVC_*`, or if the creds file has the wrong mode.
+It fails if the hooks are not wired, if a wired hook points at a file that no
+longer exists, if your environment still exports `GOVC_*`, or if the creds file
+has the wrong mode.
+
+**Platforms:** Linux and macOS. The Python is portable, but the installer and
+tests are POSIX shell and no PowerShell version has been tested — on Windows,
+run the wrapper from WSL or Git Bash.
 
 **The skill needs no changes.** A `PreToolUse` hook rewrites `govc …` into
 `govc-safe …` before the command runs — including every invocation in a

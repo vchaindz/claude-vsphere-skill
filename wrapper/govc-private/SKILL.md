@@ -165,3 +165,6 @@ Structure still leaks by design: counts, cluster sizes, guest-OS versions and
 ESXi build numbers survive pseudonymisation, because removing them would remove
 the point of the reports. If build numbers are themselves sensitive, say so —
 they map to published CVEs.
+
+The wrapper is installed and tested on Linux and macOS. On Windows it is run
+from WSL or Git Bash; there is no tested native PowerShell installation.

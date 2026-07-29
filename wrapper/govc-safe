@@ -31,6 +31,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -212,6 +213,9 @@ class TokenMap:
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS seq (kind TEXT PRIMARY KEY, n INTEGER NOT NULL)")
         if new:
+            # Advisory only on Windows, where chmod honours just the read-only
+            # bit -- 0o600 is a no-op there. A Windows installer must set ACLs
+            # on this file and its parent instead of trusting the mode.
             try:
                 os.chmod(path, 0o600)
             except OSError:
@@ -267,10 +271,15 @@ class TokenMap:
 # --- govc execution ----------------------------------------------------------
 
 def load_creds():
-    env = {
-        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "HOME": _HOME,          # govc caches its session in ~/.govmomi
-    }
+    # A near-empty environment is deliberate -- govc must not inherit stray
+    # GOVC_* from the caller. But a few variables are load-bearing and must be
+    # passed through: govmomi finds its session cache via HOME on POSIX and
+    # USERPROFILE on Windows, and omitting SystemRoot breaks TLS there.
+    env = {"PATH": os.environ.get("PATH", os.defpath), "HOME": _HOME}
+    for k in ("USERPROFILE", "APPDATA", "LOCALAPPDATA", "SystemRoot", "windir",
+              "TEMP", "TMP", "PATHEXT", "ComSpec", "LANG", "LC_ALL"):
+        if k in os.environ:
+            env[k] = os.environ[k]
     if os.path.exists(CREDS_FILE):
         with open(CREDS_FILE) as fh:
             for line in fh:
@@ -296,7 +305,11 @@ def load_creds():
 
 
 def run_govc(args, env):
-    proc = subprocess.run([GOVC] + args, capture_output=True, text=True, env=env)
+    # Resolve to an absolute path: on Windows CreateProcess searches the current
+    # directory before PATH, so a bare name could be hijacked by a govc.exe
+    # dropped in the working directory.
+    exe = GOVC if os.path.isabs(GOVC) else (shutil.which(GOVC) or GOVC)
+    proc = subprocess.run([exe] + args, capture_output=True, text=True, env=env)
     return proc.returncode, proc.stdout, proc.stderr
 
 
