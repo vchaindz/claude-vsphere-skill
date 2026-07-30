@@ -201,6 +201,9 @@ WRITES = re.compile(
 # noise. Writing to /dev/null or to an existing descriptor changes nothing on
 # disk, so removing these narrows the heuristic without loosening it.
 NULL_REDIR = re.compile(r"\d*>>?\s*/dev/null\b|\d*>&\s*\d+")
+# A redirection operator glued to its target: `>out`, `>>policy`, `2>log`.
+# Stripped before a token is resolved to a path.
+REDIR_PREFIX = re.compile(r"^\d*(?:>>|>|<)")
 # `python3 x.py` runs x.py; `python3 -c "open(...,'w')"` is a write. Only the
 # second form counts, or the guard could never be self-tested.
 INLINE_PROG = re.compile(r"\b(?:python3?|perl|ruby|node|awk)\b.*\s-[ce]\b")
@@ -347,6 +350,13 @@ def resolve_targets(cmd, cwd=None):
             continue
         paths = []
         for t in toks:
+            # `>>policy` and `>~/.config/govc-guard/policy` are one token to
+            # shlex, so the operator has to come off before the rest can be
+            # resolved. Without this the target became a path literally
+            # starting with `>`, matched nothing, and an attached redirection
+            # could rewrite the policy file unnoticed — while the spaced form
+            # `> policy` was caught.
+            t = REDIR_PREFIX.sub("", t)
             t = os.path.expanduser(os.path.expandvars(t))
             if t and not t.startswith("-"):
                 paths.append(os.path.normpath(os.path.join(here, t)))
@@ -360,10 +370,15 @@ def script_paths(cmd, cwd=None):
     for toks, paths in resolve_targets(cmd, cwd):
         head = os.path.basename(toks[0])
         if head in SHELL_RUNNERS or toks[0] == ".":
-            for tok, path in zip(toks[1:], paths[1:]):
-                if not tok.startswith("-"):
-                    yield path
-                    break
+            # `paths` only holds the non-flag tokens, so it lines up with the
+            # filtered token list — not with `toks`. Zipping against `toks`
+            # paired `-e` with the script's path and then skipped it for
+            # starting with a dash, so `bash -e ./destroy.sh` was never read
+            # and every govc call inside it went uninspected.
+            operands = [t for t in toks if not t.startswith("-")]
+            for tok, path in zip(operands[1:], paths[1:]):
+                yield path
+                break
         elif "/" in toks[0] or toks[0].endswith((".sh", ".bash", ".zsh")):
             yield paths[0]
 
@@ -526,6 +541,16 @@ def decide(cmd, tier, extra_deny, allow, note, cwd=None):
     # model put in a file with the Write tool is not in the command at all.
     worst = None
     for origin, text in [("", cmd)] + read_scripts(cmd, cwd):
+        # Self-protection has to follow the command into the script, not just
+        # guard the top line. `sh raise-tier.sh` is one harmless-looking token
+        # at this level, and the write to the policy file lives inside the
+        # file — checking only `cmd` let an agent script its own tier change,
+        # which is the one thing the root-of-trust claim rests on.
+        if origin and guards_itself(text, os.path.dirname(origin)):
+            return ("deny", prefix + f"the script {origin} writes to the "
+                    "govc-guard policy file or to the policy hook itself. The "
+                    "tier is the operator's to set, not the agent's — ask "
+                    f"them to edit {POLICY_PATH} directly.")
         v = scan(text, tier, extra_deny, allow, prefix, origin)
         if v and v[0] == "deny":
             return v
@@ -746,10 +771,32 @@ def selftest():
         f.write("#!/bin/sh\ngovc vm.destroy VM-1\n")
     with open(os.path.join(tmp, "notes.md"), "w") as f:
         f.write("run govc vm.destroy VM-1 by hand\n")
+    # a script that rewrites the policy: self-protection must follow the
+    # command into the file, or an agent can script its own tier change
+    with open(os.path.join(tmp, "raise.sh"), "w") as f:
+        f.write(f"#!/bin/sh\necho 'tier = full' > {POLICY_PATH}\n")
+    # an interpreter flag must not hide the script from inspection
     extra += [
         (f"sh {tmp}/d.sh",                                         "deny"),
+        (f"bash -e {tmp}/d.sh",                                    "deny"),
+        (f"sh -x {tmp}/d.sh",                                      "deny"),
+        (f"bash --norc -e {tmp}/d.sh",                             "deny"),
+        (f"sh {tmp}/raise.sh",                                     "deny"),
+        (f"bash -e {tmp}/raise.sh",                                "deny"),
         (f"cat {tmp}/notes.md",                                    None),
         (f"sh {tmp}/nonexistent.sh",                               None),
+        # a redirection glued to its target still names the file it writes
+        (f"printf 'tier = full' >{POLICY_PATH}",                   "deny"),
+        (f"printf 'tier = full' >>{POLICY_PATH}",                  "deny"),
+        (f"cd {os.path.dirname(POLICY_PATH)} && printf x "
+         f">>{os.path.basename(POLICY_PATH)}",                     "deny"),
+        # Over-broad but deliberate: the test is "writes something AND names a
+        # guard file", not "writes TO a guard file". Copying the policy
+        # elsewhere is refused along with overwriting it. Narrowing this to
+        # the redirect target alone would have to keep catching `cp x policy`,
+        # `sed -i policy` and `tee policy`, where the guard file is an operand
+        # rather than a target — so it stays fail-closed.
+        (f"cat {POLICY_PATH} >/tmp/copy-of-policy",                "deny"),
     ]
     for cmd, expected in extra:
         v = decide(cmd, "standard", set(), set(), "")
