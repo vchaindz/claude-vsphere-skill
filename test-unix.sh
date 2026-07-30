@@ -180,7 +180,9 @@ if [ -n "$firstcluster" ]; then
     t "patch: DRS enabled + mode"    bash -c \
       "govc collect -json '$firstcluster' configurationEx | jq -e '.[0].val | has(\"drsConfig\")' >/dev/null"
     t "patch: cluster summary"       govc collect -json "$firstcluster" summary
-    t "patch: per-VM DRS overrides"  govc cluster.override.info -json "$firstcluster"
+    # -cluster, not positional: override.info takes no operand and would
+    # otherwise report on GOVC_CLUSTER or whichever cluster govc picks
+    t "patch: per-VM DRS overrides"  govc cluster.override.info -json -cluster "$firstcluster"
     # host capacity: cores x cpuMhz must sum to what cluster.usage reports
     t "patch: host capacity batch"   bash -c \
       "govc collect -json -type h '$firstcluster' name summary.hardware.numCpuCores summary.hardware.cpuMhz summary.hardware.memorySize >/dev/null"

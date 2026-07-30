@@ -84,7 +84,7 @@ where it disagrees with your sum, vCenter is right.
 govc collect -json "$cluster" configurationEx |
   jq -r 'def b(x): if x == null then "not-configured" else (x|tostring) end;
     .[0].val.drsConfig | "DRS enabled=\(b(.enabled))  mode=\(.defaultVmBehavior // "-")"'
-govc cluster.override.info -json "$cluster"
+govc cluster.override.info -json -cluster "$cluster"
 ```
 
 `fullyAutomated` is what makes `host.maintenance.enter` evacuate by itself. Under
@@ -108,6 +108,12 @@ Ask for `configurationEx` whole. The nested form
 with `ServerFaultCode: InvalidProperty`; the PropertyCollector does not traverse into that
 property. `references/health-check.md` has the same note for the same reason.
 
+**`cluster.override.info` takes no positional argument** — its usage is
+`[OPTIONS]` only, so a cluster path handed to it as an operand is ignored and govc falls
+back to `-cluster` / `GOVC_CLUSTER` / the single cluster it can find. On a multi-cluster
+vCenter that silently reports overrides for the *wrong* cluster, which is worse than an
+error on patch day. Always pass `-cluster "$cluster"`.
+
 `cluster.override.info` is read-class (it ends in `.info`) and shows per-VM DRS overrides —
 a VM pinned to `manual` inside a `fullyAutomated` cluster is the single most common reason
 an evacuation stalls at 90%.
@@ -121,10 +127,29 @@ govc collect -json -type m "$host" name runtime.powerState config.template |
     .[] | ([.changeSet[] | {(.name): (.val|v)}] | add) as $p |
     [$p.name, $p["runtime.powerState"], ($p["config.template"] // false)] | @tsv'
 
-# datastores mounted by exactly one host: a VM with files there cannot move off it
+# datastores mounted by exactly one host — anywhere in the datacenter
 govc datastore.info -json |
-  jq -r '.datastores[] | select((.host | length) == 1) | .name'
+  jq -r '.datastores[] | select((.host | length) == 1) | .name' | sort -u >/tmp/single-ds
+
+# datastore names actually used by the VMs registered on THIS host
+vms=$(govc collect -s -type m "$host" name)
+[ -n "$vms" ] && printf '%s\n' "$vms" | tr '\n' '\0' |
+  xargs -0 -I{} govc find / -type m -name {} | tr '\n' '\0' |
+  xargs -0 govc vm.info -json |
+  jq -r '.virtualMachines[] | .name as $n |
+    (.layoutEx.file // [])[].name
+    | capture("^\\[(?<ds>[^]]+)\\]").ds
+    | "\($n)\t\(.)"' | sort -u >/tmp/host-ds
+
+# the intersection is the blocker list: this host's VMs on single-host storage
+awk -F'\t' 'NR==FNR {s[$1]; next} ($2 in s)' /tmp/single-ds /tmp/host-ds
 ```
+
+**Scope this to the host, not the datacenter.** A bare list of single-host datastores says
+nothing about the host being patched: a local datastore belonging to some *other* host is
+not a blocker here, and listing it produces a no-go the admin cannot act on. What matters
+is whether a VM *on this host* has files on storage only this host can see. The
+`layoutEx.file[].name` prefix (`[datastore] folder/file.vmdk`) is where that lives.
 
 `govc collect -type m <hostPath>` returns exactly the VMs registered on that host, which is
 what you want — `find` cannot express "on this host" without a property filter.
@@ -145,7 +170,15 @@ The recurring blockers, in the order they actually occur:
 ```bash
 govc collect -s -type m "$host" name | tr '\n' '\0' |
   xargs -0 -I{} govc find / -type m -name {} -snapshot.currentSnapshot '*'
-govc find / -type m -runtime.consolidationNeeded true
+
+# consolidation, scoped to this host — an inventory-wide `find /` reports VMs
+# elsewhere in the vCenter and turns them into risk notes for a host they have
+# nothing to do with
+onhost=$(govc collect -s -type m "$host" name | sort -u)
+govc find / -type m -runtime.consolidationNeeded true |
+  while IFS= read -r p; do
+      printf '%s\n' "$onhost" | grep -qxF "$(basename "$p")" && printf '%s\n' "$p"
+  done
 ```
 
 A VM with a snapshot migrates fine, so this is not a blocker — it is a *risk note*. A host
@@ -159,8 +192,17 @@ consolidating **before** the window, not during it. `references/snapshots.md` ha
 ```bash
 govc tasks -n 50 -l                          # anything still running?
 govc alarms -json                            # bare form, whole inventory
-govc find / -type h -runtime.inMaintenanceMode true
-govc find / -type h -runtime.connectionState notResponding
+
+# hosts already in maintenance, scoped to THIS cluster — the no-go condition is
+# "another host in the cluster we are about to remove capacity from", so a host
+# in maintenance in some unrelated cluster must not block this window
+govc collect -json -type h "$cluster" name runtime.inMaintenanceMode \
+    runtime.connectionState |
+  jq -s -r 'def v: if type=="object" and has("_value") then ._value else . end;
+    .[] | ([.changeSet[] | {(.name): (.val|v)}] | add) as $p |
+    select($p["runtime.inMaintenanceMode"] == true
+           or $p["runtime.connectionState"] != "connected") |
+    [$p.name, $p["runtime.inMaintenanceMode"], $p["runtime.connectionState"]] | @tsv'
 ```
 
 A cluster that already has a host in maintenance is a no-go: you are about to take the
