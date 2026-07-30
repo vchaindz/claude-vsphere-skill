@@ -53,7 +53,7 @@ govc collect -json -type h / name runtime.connectionState runtime.inMaintenanceM
 ```
 ```powershell
 # no jq: ConvertFrom-Json per line, then flatten the changeSet into a hashtable
-govc collect -json -type h / name runtime.connectionState '-runtime.inMaintenanceMode' |
+govc collect -json -type h / name runtime.connectionState runtime.inMaintenanceMode |
   ForEach-Object { $_ | ConvertFrom-Json } | ForEach-Object {
     $p = @{}; $_.changeSet | ForEach-Object { $p[$_.name] = $_.val }
     [pscustomobject]$p }
@@ -67,6 +67,13 @@ run rebooted, and an unexplained reboot is worth a warning.
 `collect -type` reads one property set from every object of a type in a single call —
 see `references/inventory-reporting.md` for the two traps it carries (flags before the
 root, and the `{"_value":[…]}` wrapper on array properties).
+
+**Do not quote these property names with a leading dash**, in PowerShell or anywhere else.
+The usage is `collect [OPTIONS] [MOID] [PROPERTY]...`, so properties are *positional*; a
+token beginning with `-` is parsed as an option and rejected. The skill's rule about
+quoting dotted flags applies to `find` filters like `'-runtime.powerState'`, which really
+are flags — writing `'-runtime.inMaintenanceMode'` here breaks the call instead of
+protecting it.
 
 ## 2. Triggered alarms
 
@@ -100,18 +107,24 @@ and read as a failed command.
 
 ```bash
 govc datastore.info -json |
-  jq -r '.datastores[] | select(.summary.capacity > 0) |
+  jq -r '.datastores[] |
     [.name, .summary.accessible,
      (.summary.capacity/1073741824|floor),
      (.summary.freeSpace/1073741824|floor),
-     ((1 - .summary.freeSpace/.summary.capacity) * 100 | floor)] | @tsv'
+     (if (.summary.capacity // 0) > 0
+      then ((1 - .summary.freeSpace/.summary.capacity) * 100 | floor)
+      else "n/a" end)] | @tsv'
 ```
 
-`select(.summary.capacity > 0)` is not decoration: an unmounted or unreachable datastore
-reports capacity `0`, and dividing by it yields `null` percentages that sort to the top
-of the report looking like the healthiest volume in the estate.
+**Never filter on capacity.** An unmounted or unreachable datastore reports capacity `0`,
+so `select(.summary.capacity > 0)` drops exactly the rows this check exists to raise — the
+inaccessible ones — before `accessible` is ever read. Guard the *division* instead, which
+is the only thing capacity `0` actually breaks: without the guard it yields `null`
+percentages that sort to the top of the report looking like the healthiest volume in the
+estate.
 
-`accessible: false` is critical regardless of capacity. With more than one datacenter,
+`accessible: false` is critical regardless of capacity, and a datastore reporting `n/a`
+usage is a finding, not a gap in the data. With more than one datacenter,
 `datastore.info` needs a context — set `GOVC_DATACENTER` or loop `-dc` over
 `govc find / -type d`, and treat `datastore '*' not found` from an empty datacenter as
 "no datastores here", not as an error.
@@ -119,14 +132,29 @@ of the report looking like the healthiest volume in the estate.
 ## 4. Snapshots — age, chain depth, size
 
 ```bash
-govc find / -type m -snapshot.currentSnapshot '*' | tr '\n' '\0' |
+vms=$(govc find / -type m -snapshot.currentSnapshot '*')
+[ -n "$vms" ] && printf '%s\n' "$vms" | tr '\n' '\0' |
   xargs -0 govc vm.info -json |
   jq -r 'def nodes: ., (.childSnapshotList[]? | nodes);
+    def depth: 1 + ([.childSnapshotList[]? | depth] | max // 0);
     .virtualMachines[] | . as $vm |
     [$vm.name,
-     ([$vm.snapshot.rootSnapshotList[]? | nodes] | length),
+     ([$vm.snapshot.rootSnapshotList[]? | nodes]     | length),
+     ([$vm.snapshot.rootSnapshotList[]? | depth]     | max),
      ([$vm.snapshot.rootSnapshotList[]? | nodes | .createTime] | min)] | @tsv'
 ```
+
+Columns: name, **total snapshots**, **deepest chain**, oldest `createTime` — and the two
+numbers are not the same question. Counting every node answers "how much sprawl"; the
+`> 3 in a chain` threshold is about *depth*, because it is a long delta chain that makes
+consolidation slow and risky. A VM with four independent root snapshots one level deep
+counts 4 and has depth 1; reporting the count against the depth threshold raises a
+critical that is not there.
+
+**Guard the empty case.** With no matching VMs, GNU `xargs` still runs the command once
+with no arguments, so `vm.info` is invoked bare and fails — turning a clean result into a
+failed check. BSD `xargs` skips it, so this only breaks on Linux. The `[ -n "$vms" ]` test
+is the portable fix; `xargs -r` is GNU-only and would fail on macOS.
 
 The recursion is the point. `rootSnapshotList` holds only the top of each tree, so a flat
 read reports a three-deep chain as one snapshot — and deep chains are exactly what the
@@ -145,7 +173,8 @@ govc find / -type m -runtime.consolidationNeeded true
 ## 5. VMware Tools on powered-on VMs
 
 ```bash
-govc find / -type m -runtime.powerState poweredOn | tr '\n' '\0' |
+vms=$(govc find / -type m -runtime.powerState poweredOn)
+[ -n "$vms" ] && printf '%s\n' "$vms" | tr '\n' '\0' |
   xargs -0 govc vm.info -json |
   jq -r '.virtualMachines[] |
     select((.guest.toolsRunningStatus // "") != "guestToolsRunning") |
@@ -155,7 +184,9 @@ govc find / -type m -runtime.powerState poweredOn | tr '\n' '\0' |
 Powered-on only — Tools not running on a powered-off VM is not a finding. `tr '\n' '\0' |
 xargs -0` is mandatory: VM paths routinely contain spaces (`/DC1/vm/My App Server`), which
 bare `xargs` splits into separate arguments, and `xargs -d '\n'` is a GNU extension that
-fails on macOS with `xargs: illegal option -- d`.
+fails on macOS with `xargs: illegal option -- d`. The `[ -n "$vms" ]` guard is the same
+empty-input protection as check 4 — an estate with everything powered off would otherwise
+run `vm.info` with no arguments and report a failure instead of a clean result.
 
 ## 6. Cluster HA / DRS / admission control
 
@@ -234,8 +265,12 @@ intervention.
 ## 8. Errors in the last 24 hours
 
 ```bash
+# portable "24 hours ago": GNU date wants -d, BSD/macOS date wants -v
+since=$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+     || date -u -v-24H '+%Y-%m-%dT%H:%M:%SZ')
+
 govc events -n 500 -l -json |
-  jq -s -r --arg since "$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ')" '
+  jq -s -r --arg since "$since" '
     [.[] | select(.category == "error")
          | select((.createdTime | sub("\\.[0-9]+"; "")) >= $since)]
     | group_by(.eventTypeId // .type) | sort_by(-length)
@@ -250,6 +285,10 @@ Two gotchas, both of which produce a silently empty report if you miss them:
   for more than a day's worth and filter on `.createdTime` yourself. Say in the report
   which window you actually covered — "the last 500 events, reaching back to 03:12
   yesterday" — because that is not the same as "24 hours" and the reader needs to know.
+- **`date -d` is GNU-only.** BSD `date` on macOS takes `-v-24H` instead and exits non-zero
+  on `-d`, so the unguarded form leaves `$since` empty and the filter silently matches
+  everything. The `||` fallback above covers both; the rest of this skill is macOS-clean
+  and this check should stay that way.
 - **`fromdateiso8601` rejects vSphere timestamps.** Every one carries fractional seconds,
   which jq's parser will not accept; strip them (`sub("\\.[0-9]+"; "")`) or compare the
   strings lexically as above, which works because the format is fixed-width UTC.

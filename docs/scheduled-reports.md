@@ -200,8 +200,14 @@ $trigger = New-ScheduledTaskTrigger -Daily -At 06:30
 $set     = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 30) `
              -StartWhenAvailable
 
+# -Password takes a plain string, not a SecureString: passing the result of
+# `Read-Host -AsSecureString` registers the literal text System.Security.SecureString
+# as the account password, and the task then fails to start with a logon error.
+$cred = Get-Credential -UserName 'DOMAIN\svc-vsphere' -Message 'Service account password'
+
 Register-ScheduledTask -TaskName 'vSphere health check' -Action $action -Trigger $trigger `
-  -Settings $set -User 'DOMAIN\svc-vsphere' -Password (Read-Host -AsSecureString 'Password') `
+  -Settings $set -User $cred.UserName `
+  -Password $cred.GetNetworkCredential().Password `
   -RunLevel Limited
 ```
 

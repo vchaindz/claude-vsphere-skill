@@ -156,8 +156,8 @@ govc-safe find / -type m -runtime.powerState poweredOn | tr '\n' '\0' |
 govc-safe find / -type c | while IFS= read -r c; do
   govc-safe collect -json "$c" configurationEx |
   jq -r '.[0].val.dasConfig.enabled'; done | grep -c false                # 6 clusters, HA off
-govc-safe find / -type m -runtime.connectionState orphaned | wc -l       # 7 (also: inaccessible,
-                                                                         #    invalid)
+for st in orphaned inaccessible invalid; do                               # 7 all three states
+  govc-safe find / -type m -runtime.connectionState "$st" | wc -l; done
 govc-safe events -n 500 -l -json | jq -s '[.[] | select(.category == "error")] | length'  # 8
 # 9 (orphaned-VMDK scan) is slow and opt-in — ask first, never in an unattended run
 ```
