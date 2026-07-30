@@ -193,6 +193,14 @@ GUARD_FILES = frozenset(
 WRITES = re.compile(
     r">|\btee\b|\b(?:rm|mv|cp|ln|install|chmod|chown|truncate|dd|touch|"
     r"shred)\b|\bsed\s+-[a-z]*i\b|\bgit\s+(?:checkout|restore|clean)\b")
+# Redirections that cannot modify a file, stripped before the WRITES test:
+# `2>/dev/null`, `>/dev/null`, `2>&1`, `>&2`. Without this, reading a guard
+# file at all — `grep tier ~/.config/govc-guard/policy 2>/dev/null` — trips the
+# bare `>` in WRITES and is refused as an attempt to overwrite the policy. That
+# is a false positive users hit constantly, and it teaches them the guard is
+# noise. Writing to /dev/null or to an existing descriptor changes nothing on
+# disk, so removing these narrows the heuristic without loosening it.
+NULL_REDIR = re.compile(r"\d*>>?\s*/dev/null\b|\d*>&\s*\d+")
 # `python3 x.py` runs x.py; `python3 -c "open(...,'w')"` is a write. Only the
 # second form counts, or the guard could never be self-tested.
 INLINE_PROG = re.compile(r"\b(?:python3?|perl|ruby|node|awk)\b.*\s-[ce]\b")
@@ -204,13 +212,22 @@ MAX_SCRIPT_BYTES = 1 << 20
 MAX_SCRIPTS = 16
 
 # matches govc, ./govc, /path/govc, govc.exe, AND govc-safe — policy applies
-# to the privacy wrapper too, but not to govc-rehydrate (handled elsewhere)
+# to the privacy wrapper too, but not to govc-rehydrate (handled elsewhere).
+#
+# The trailing lookahead rejects `/` and `\` as well: `govc/references/x.md` is
+# a *directory* named govc, not the binary, and without this the path parses as
+# an invocation whose subcommand is `/references/x.md` — unknown, therefore
+# mutate, therefore denied at readonly. This skill's own source tree is called
+# `govc/`, so that false positive refuses ordinary commands about the repo.
+# Coverage does not suffer: `bash govc/run.sh` is still read through as a
+# script, and a genuine path form like `govc/../govc vm.destroy` is still
+# matched, because the prefix group consumes the whole directory run.
 CALL_RE = re.compile(
     r"(?<![\w/.\\-])"
     r"(?:[A-Za-z]:)?"
     r"(?:[\w.\\/-]*[\\/])?"
     r"govc(?:-safe)?(?:\.exe)?"
-    r"(?![\w.-])")
+    r"(?![\w.\\/-])")
 
 
 def flag_names(args):
@@ -300,8 +317,14 @@ def strip_comments(cmd):
 
 
 def segments(cmd):
-    """Split a command into pipeline/list segments, tokenised."""
-    for seg in re.split(r"[|;&\n]|&&|\|\|", strip_comments(cmd)):
+    """Split a command into pipeline/list segments, tokenised.
+
+    Descriptor redirections go first, before the split: `2>&1` contains an `&`,
+    so splitting on separators would tear it into a segment ending in a bare
+    `>` and make an ordinary read look like an overwrite.
+    """
+    for seg in re.split(r"[|;&\n]|&&|\|\|",
+                        NULL_REDIR.sub(" ", strip_comments(cmd))):
         try:
             toks = shlex.split(seg)
         except ValueError:
@@ -416,7 +439,7 @@ def out(decision, reason):
 def guards_itself(cmd, cwd=None):
     """True if the command writes to the policy file or to this script."""
     for toks, paths in resolve_targets(cmd, cwd):
-        text = " ".join(toks)
+        text = " ".join(toks)   # segments() already removed fd redirections
         if not (WRITES.search(text) or INLINE_PROG.search(text)):
             continue
         if any(os.path.realpath(p) in GUARD_FILES for p in paths):
@@ -643,6 +666,16 @@ def selftest():
         # not govc at all
         ("govcxyz destroy",                          "readonly", None),
         ("echo govc-rehydrate",                      "readonly", None),
+        # `govc/` is a directory named govc, not the binary. This repo's own
+        # source tree is govc/, so these must not read as invocations.
+        ("sed -n '1,5p' govc/references/patching.md", "readonly", None),
+        ("ls govc/references/",                      "readonly", None),
+        ("cp govc/SKILL.md /tmp/x",                  "readonly", None),
+        ("wc -l govc/assets/report-template.html",   "readonly", None),
+        # ...but a real binary reached through a path still classifies
+        ("govc/../govc vm.destroy x",                "standard", "deny"),
+        ("./govc vm.destroy x",                      "standard", "deny"),
+        ("/opt/bin/govc vm.destroy x",               "standard", "deny"),
     ]
     failed = 0
     for cmd, tier, expected in cases:
@@ -671,6 +704,16 @@ def selftest():
                                                                    "deny"),
         (f"cat {POLICY_PATH}",                                     None),
         (f"python3 {__file__} --selftest",                         None),
+        # reading a guard file while discarding stderr is still only a read:
+        # the `>` in `2>/dev/null` must not read as an overwrite
+        (f"cat {POLICY_PATH} 2>/dev/null",                         None),
+        (f"grep -E '^tier' {POLICY_PATH} 2>/dev/null",             None),
+        (f"head -1 {POLICY_PATH} 2>&1",                            None),
+        (f"cat {__file__} 2>/dev/null",                            None),
+        # ...while an actual write to one, however it redirects, is not
+        (f"echo 'tier = full' > {POLICY_PATH} 2>/dev/null",        "deny"),
+        (f"cp /tmp/mine {__file__} 2>/dev/null",                   "deny"),
+        (f"tee {POLICY_PATH} < /tmp/x 2>/dev/null",                "deny"),
     ]
     # scripts are read through, files that are only read are not
     tmp = tempfile.mkdtemp()
