@@ -75,7 +75,9 @@ Every govc command accepts `-json` (and most `-xml`/`-dump`). For reports:
   **Always use `tr '\n' '\0' | xargs -0`, never bare `xargs`.** VM paths routinely contain
   spaces (`/DC1/vm/My App Server`), which bare `xargs` splits into separate arguments. Do
   not use `xargs -d '\n'` either — that is a GNU extension and fails on macOS.
-- Deliver reports as Markdown tables, CSV, or HTML files depending on what the user wants.
+- Deliver quick answers as Markdown tables in chat. When the user wants a report **as a
+  file** (to keep, share, or send to a client), use the standard HTML template — see
+  `references/report-template.md` and `assets/report-template.html`.
 
 ## Domain references
 
@@ -89,6 +91,7 @@ Read the reference file matching the task — each contains commands, tested pat
 | Snapshots: create, revert, remove, tree, audit | `references/snapshots.md` |
 | Hosts and clusters: maintenance, DRS/HA, rules, resource pools, esxcli | `references/host-cluster.md` |
 | Datastores, disks, networking (vSwitch/DVS/portgroups) | `references/storage-network.md` |
+| HTML report deliverables: template, severity rules, structure | `references/report-template.md` |
 
 ## Quick command map
 

@@ -157,14 +157,34 @@ Recommended first interactive test: start `claude`, ask for an inventory report,
 ```
 govc/
 ├── SKILL.md                      # workflow, safety rules, command map, Windows notes
+├── assets/
+│   └── report-template.html      # self-contained styled HTML report skeleton
 └── references/                   # loaded on demand (progressive disclosure)
     ├── setup.md                  # install, auth, TLS, sessions, troubleshooting, vcsim
     ├── inventory-reporting.md    # find/collect/jq patterns, metrics, events, health checks
+    ├── report-template.md        # how report files are structured, severities, thresholds
     ├── vm-lifecycle.md           # create, clone, power, migrate, guest ops, destroy
     ├── snapshots.md              # create, audit, revert, cleanup workflow
     ├── host-cluster.md           # maintenance mode, DRS/HA rules, pools, esxcli
     └── storage-network.md        # datastores, disks, vSwitch/DVS/portgroups
 ```
+
+Ask for any report "as a file" and it lands as a polished, self-contained HTML
+deliverable: findings first (severity-badged, exact objects named, recommended
+actions), KPI summary cards, sortable data tables, and per-section source commands
+and thresholds so every number is auditable. No CDN or external assets — safe to
+email or open on an air-gapped workstation.
+
+See it before you install it — `examples/` holds the same health check generated twice
+against the vcsim simulator:
+
+| File | What it shows |
+|---|---|
+| `examples/health-check-vcsim-2026-07-30.html` | normal output, real object names |
+| `examples/health-check-vcsim-tokens-2026-07-30.html` | the identical report with the [privacy wrapper](#optional-keeping-real-identifiers-away-from-the-model) active — every name, MoRef, UUID and address replaced by a stable pseudonym, and the vCenter endpoint withheld |
+
+Open them side by side: same findings, same numbers, same layout — the only difference is
+whether a real identifier ever left the host.
 
 Battle-tested details baked in from real-world runs: PowerShell splits unquoted dotted flags like `-runtime.powerState` (quote them), `host.info` needs an explicit host when there's more than one, multi-datacenter vCenters need `-dc`/`GOVC_DATACENTER` context, an empty datacenter answers `datastore.info` with a misleading "not found", `snapshot.remove` rejects the `id` integer that `vm.info -json` shows and wants the `snapshot-NNNNN` managed object ID instead, and a snapshot audit must recurse into `childSnapshotList` or it reports a deep chain as a single snapshot.
 
@@ -395,6 +415,7 @@ changes.
 | `govc/` | **The skill** — the only thing you need to copy |
 | `wrapper/` | Optional pseudonymising proxy, hooks, installer, and both test suites |
 | `wrapper/govc-private/` | Companion skill for token-space operation |
+| `examples/` | Generated HTML reports (vcsim), with and without the wrapper |
 | `test-windows.ps1` | Windows setup + smoke test against vcsim |
 | `test-unix.sh` | Linux/macOS setup + smoke test against vcsim (`--vcsim`) or a real vCenter |
 | `images/` | Screenshots |

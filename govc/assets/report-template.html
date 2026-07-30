@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{REPORT_TITLE}} — {{ENVIRONMENT_NAME}}</title>
+<!--
+  vSphere report template (claude-vsphere-skill)
+  ================================================
+  Self-contained: no CDN, no external fonts, no images. Safe to email,
+  archive, or open on an air-gapped management workstation.
+
+  How to fill this template — see references/report-template.md for the
+  full rules. Summary of the placeholder tokens:
+
+    {{REPORT_TITLE}}       e.g. "Snapshot Audit", "Environment Health Check"
+    {{ENVIRONMENT_NAME}}   e.g. "ACME Production", or the vCenter FQDN
+    {{VCENTER}}            vCenter/ESXi endpoint (from `govc about`)
+    {{VSPHERE_VERSION}}    product name + version + build (from `govc about`)
+    {{GENERATED_AT}}       local time with zone, e.g. 2026-07-30 09:15 CEST
+    {{SCOPE}}              what was inspected, e.g. "2 datacenters · 3 clusters · 14 hosts · 412 VMs"
+    {{KPI_CARDS}}          repeat the .kpi block
+    {{FINDINGS_ROWS}}      repeat the findings <tr> block
+    {{SECTIONS}}           repeat the <section> block per data table
+    {{FOOTER_NOTE}}        data-collection note, e.g. "All data collected read-only via govc 0.44"
+
+  Severity vocabulary (class names on badges and findings rows):
+    sev-critical  — action required now (data loss / outage risk)
+    sev-warning   — should be addressed (approaching threshold, best-practice violation)
+    sev-ok        — checked and healthy
+    sev-info      — contextual information, no action
+
+  HTML-escape every value taken from vSphere before inserting it (& < > "), including
+  inside <code> tags — object names and annotations are free text, not markup.
+
+  Every <table> with class "sortable" gets click-to-sort headers automatically.
+  Numeric cells: add class "num" (right-aligned, sorted numerically —
+  put the raw number in data-v="..." if the cell text is formatted, e.g.
+  <td class="num" data-v="1099511627776">1.0 TB</td>).
+-->
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --ink: #1c2733; --muted: #5f6b7a;
+    --line: #e3e7ec; --accent: #0b6bcb;
+    --critical: #c62828; --critical-bg: #fdecea;
+    --warning: #b26a00; --warning-bg: #fff4e0;
+    --ok: #2e7d32; --ok-bg: #e8f5e9;
+    --info: #37474f; --info-bg: #eceff1;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 24px 64px; }
+
+  /* ---------- header ---------- */
+  header { border-bottom: 3px solid var(--accent); padding-bottom: 18px; margin-bottom: 24px; }
+  header h1 { margin: 0 0 4px; font-size: 26px; letter-spacing: -0.3px; }
+  header .env { font-size: 17px; color: var(--accent); font-weight: 600; }
+  .meta { display: flex; flex-wrap: wrap; gap: 6px 28px; margin-top: 10px;
+          font-size: 13px; color: var(--muted); }
+  .meta b { color: var(--ink); font-weight: 600; }
+
+  /* ---------- KPI cards ---------- */
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+          gap: 12px; margin: 24px 0; }
+  .kpi { background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+         padding: 14px 16px; }
+  .kpi .n { font-size: 26px; font-weight: 700; line-height: 1.2; }
+  .kpi .l { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .kpi.sev-critical .n { color: var(--critical); }
+  .kpi.sev-warning  .n { color: var(--warning); }
+  .kpi.sev-ok       .n { color: var(--ok); }
+
+  /* ---------- badges ---------- */
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px;
+           font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .badge.sev-critical { color: var(--critical); background: var(--critical-bg); }
+  .badge.sev-warning  { color: var(--warning);  background: var(--warning-bg); }
+  .badge.sev-ok       { color: var(--ok);       background: var(--ok-bg); }
+  .badge.sev-info     { color: var(--info);     background: var(--info-bg); }
+
+  /* ---------- sections & tables ---------- */
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+            padding: 20px 22px; margin-bottom: 20px; }
+  section h2 { margin: 0 0 4px; font-size: 18px; }
+  section .desc { margin: 0 0 14px; font-size: 13.5px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line);
+           vertical-align: top; }
+  th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px;
+       color: var(--muted); border-bottom: 2px solid var(--line); user-select: none; }
+  .sortable th { cursor: pointer; }
+  .sortable th:hover { color: var(--accent); }
+  .sortable th .dir { font-size: 10px; }
+  tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: #f8fafc; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.sev-critical td:first-child { box-shadow: inset 3px 0 0 var(--critical); }
+  tr.sev-warning  td:first-child { box-shadow: inset 3px 0 0 var(--warning); }
+  .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
+  code { background: var(--info-bg); border-radius: 4px; padding: 1px 5px;
+         font: 12.5px ui-monospace, "Cascadia Code", Consolas, monospace; }
+
+  /* ---------- footer ---------- */
+  footer { margin-top: 32px; font-size: 12.5px; color: var(--muted);
+           border-top: 1px solid var(--line); padding-top: 14px; }
+
+  /* ---------- print ---------- */
+  @media print {
+    body { background: #fff; }
+    .wrap { padding: 0; max-width: none; }
+    section, .kpi { border: 1px solid #ccc; break-inside: avoid; }
+    tbody tr:hover { background: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>{{REPORT_TITLE}}</h1>
+    <div class="env">{{ENVIRONMENT_NAME}}</div>
+    <div class="meta">
+      <span><b>vCenter:</b> {{VCENTER}}</span>
+      <span><b>Version:</b> {{VSPHERE_VERSION}}</span>
+      <span><b>Scope:</b> {{SCOPE}}</span>
+      <span><b>Generated:</b> {{GENERATED_AT}}</span>
+    </div>
+  </header>
+
+  <!-- ============ summary KPIs: one .kpi per headline number ============ -->
+  <div class="kpis">
+    {{KPI_CARDS}}
+    <!-- example:
+    <div class="kpi sev-critical"><div class="n">3</div><div class="l">Datastores &gt; 85% full</div></div>
+    <div class="kpi sev-warning"><div class="n">12</div><div class="l">Snapshots &gt; 7 days</div></div>
+    <div class="kpi sev-ok"><div class="n">14/14</div><div class="l">Hosts connected</div></div>
+    <div class="kpi"><div class="n">412</div><div class="l">VMs total</div></div>
+    -->
+  </div>
+
+  <!-- ============ findings: one row per finding, worst first ============ -->
+  <section id="findings">
+    <h2>Findings</h2>
+    <p class="desc">Ordered by severity. Every finding names the affected objects and a recommended action.</p>
+    <table>
+      <thead><tr><th style="width:110px">Severity</th><th>Finding</th><th>Affected objects</th><th>Recommended action</th></tr></thead>
+      <tbody>
+        {{FINDINGS_ROWS}}
+        <!-- example:
+        <tr class="sev-critical">
+          <td><span class="badge sev-critical">Critical</span></td>
+          <td>Datastore over 90% full</td>
+          <td><code>LocalDS_0</code> (94%), <code>NFS-Prod-01</code> (91%)</td>
+          <td>Free or extend capacity; VMs risk pausing on snapshot growth.</td>
+        </tr>
+        <tr class="sev-warning">
+          <td><span class="badge sev-warning">Warning</span></td>
+          <td>Snapshots older than 7 days</td>
+          <td>12 VMs, oldest 91 days (<code>sql01</code>)</td>
+          <td>Review and consolidate; snapshots are not backups.</td>
+        </tr>
+        <tr>
+          <td><span class="badge sev-ok">OK</span></td>
+          <td>All hosts connected, no active alarms</td>
+          <td>14 hosts</td>
+          <td>None.</td>
+        </tr>
+        -->
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ============ data sections: one <section> per table ============ -->
+  {{SECTIONS}}
+  <!-- example:
+  <section>
+    <h2>Datastore capacity</h2>
+    <p class="desc">Source: <code>govc datastore.info -json</code>. Thresholds: warning &ge; 75%, critical &ge; 85%.</p>
+    <table class="sortable">
+      <thead><tr><th>Datastore</th><th class="num">Capacity</th><th class="num">Free</th><th class="num">Used %</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr class="sev-critical">
+          <td>LocalDS_0</td>
+          <td class="num" data-v="549755813888">512 GB</td>
+          <td class="num" data-v="32985348833">31 GB</td>
+          <td class="num" data-v="94">94%</td>
+          <td><span class="badge sev-critical">Critical</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+  -->
+
+  <footer>
+    {{FOOTER_NOTE}} · Generated with the
+    <a href="https://github.com/vchaindz/claude-vsphere-skill">claude-vsphere-skill</a> (read-only data collection via govc).
+    Verify findings before acting on production systems.
+  </footer>
+
+</div>
+
+<script>
+/* click-to-sort for table.sortable — numeric via td.num / data-v, else string */
+document.querySelectorAll("table.sortable").forEach(function (tbl) {
+  tbl.querySelectorAll("thead th").forEach(function (th, i) {
+    th.addEventListener("click", function () {
+      var tb = tbl.tBodies[0], dir = th.dataset.dir === "asc" ? -1 : 1;
+      tbl.querySelectorAll("thead th").forEach(function (h) {
+        delete h.dataset.dir; var d = h.querySelector(".dir"); if (d) d.remove();
+      });
+      th.dataset.dir = dir === 1 ? "asc" : "desc";
+      th.insertAdjacentHTML("beforeend", ' <span class="dir">' + (dir === 1 ? "▲" : "▼") + "</span>");
+      var numeric = th.classList.contains("num");
+      Array.from(tb.rows).sort(function (a, b) {
+        var x = a.cells[i], y = b.cells[i];
+        if (numeric) {
+          var xv = parseFloat(x.dataset.v || x.textContent.replace(/[^\d.-]/g, "")) || 0;
+          var yv = parseFloat(y.dataset.v || y.textContent.replace(/[^\d.-]/g, "")) || 0;
+          return (xv - yv) * dir;
+        }
+        return x.textContent.trim().localeCompare(y.textContent.trim()) * dir;
+      }).forEach(function (r) { tb.appendChild(r); });
+    });
+  });
+});
+</script>
+</body>
+</html>
