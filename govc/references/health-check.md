@@ -262,42 +262,52 @@ value. All three are critical: the VM exists in vCenter but its files are unreac
 its configuration is unreadable, which means it is neither running nor recoverable without
 intervention.
 
-## 8. Errors in the last 24 hours
+## 8. Recent errors — over the window you can actually reach
+
+**Do not call this check "the last 24 hours".** On a real vCenter you almost certainly
+cannot see that far, and the heading is the first thing a reader trusts.
 
 ```bash
-# portable "24 hours ago": GNU date wants -d, BSD/macOS date wants -v
-since=$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
-     || date -u -v-24H '+%Y-%m-%dT%H:%M:%SZ')
+# NEVER exceed -n 1000. Above the cap this returns ZERO events, not an error and not a
+# truncated list, so `jq -s` computes "0 errors" and the report says all clear.
+ev=$(govc events -n 1000 -l -json | jq -s '.')
 
-govc events -n 500 -l -json |
-  jq -s -r --arg since "$since" '
-    [.[] | select(.category == "error")
-         | select((.createdTime | sub("\\.[0-9]+"; "")) >= $since)]
+# state the window that actually came back, before reporting anything about it
+printf '%s' "$ev" | jq -r '"window covered: \([.[].createdTime]|min) .. \([.[].createdTime]|max)  (\(length) events)"'
+
+printf '%s' "$ev" | jq -r '
+    [.[] | select(.category == "error")]
     | group_by(.eventTypeId // .type) | sort_by(-length)
     | .[] | [length, (.[0].eventTypeId // .[0].type // "-")] | @tsv'
 
-govc tasks -n 200 -l -json | jq -s -r '.[] | select(.state == "error") | .descriptionId'
+# tasks DO take a real time window, so this half genuinely covers 24 hours
+govc tasks -b 24h -n 1000 -l -json |
+  jq -s -r '[.[] | select(.state == "error")] | "failed tasks (24h): \(length)"'
 ```
 
-Two gotchas, both of which produce a silently empty report if you miss them:
+Measured on vCenter 7.0.3 with 44 VMs: **1000 events reached back 3.0 hours**, and 500
+reached 1.5 hours. A busier estate reaches less. So this check answers "has anything gone
+wrong recently", not "in the last day", and the report must name the real window —
+`sev-info`, with the span in the `.desc`.
 
-- **`govc events` has no time window.** It takes a count (`-n`) and nothing else, so ask
-  for more than a day's worth and filter on `.createdTime` yourself. Say in the report
-  which window you actually covered — "the last 500 events, reaching back to 03:12
-  yesterday" — because that is not the same as "24 hours" and the reader needs to know.
-- **`date -d` is GNU-only.** BSD `date` on macOS takes `-v-24H` instead and exits non-zero
-  on `-d`, so the unguarded form leaves `$since` empty and the filter silently matches
-  everything. The `||` fallback above covers both; the rest of this skill is macOS-clean
-  and this check should stay that way.
+Three traps, each of which produces a confidently empty report:
+
+- **`-n` above 1000 returns nothing at all.** Verified: 1000 → 1000 events, 1001 → 0, 1500
+  → 0, with no error on stderr and exit 0. Asking for "more than a day's worth" is exactly
+  the instinct that yields a silent all-clear. The cap is the ceiling, not a suggestion.
+- **`govc events` has no time window** — only `-n`. There is no flag that fixes the above;
+  the reach is whatever 1000 events happens to span, which is a property of how busy the
+  vCenter is. `govc tasks` is different and does take `-b` / `-e`, which is why the failed
+  task count above can honestly claim 24 hours.
 - **`fromdateiso8601` rejects vSphere timestamps.** Every one carries fractional seconds,
   which jq's parser will not accept; strip them (`sub("\\.[0-9]+"; "")`) or compare the
-  strings lexically as above, which works because the format is fixed-width UTC.
+  strings lexically, which works because the format is fixed-width UTC. If you do filter by
+  time, note that a `date`-derived cutoff needs the GNU/BSD fallback
+  (`date -u -d '24 hours ago'` vs `date -u -v-24H`) — but with a 3-hour reach the cutoff
+  rarely excludes anything, and reporting the true span is more useful than filtering.
 
-`govc tasks` is the one command here that does take a real time window (`-b` / `-e`).
-
-Report this as `sev-info` with the counts. Escalate only on a pattern — the same object
-named repeatedly, or a count far above the usual — and say what the finding corroborates
-rather than raising it alone.
+Escalate only on a pattern — the same object named repeatedly, or a count far above the
+usual — and say what the finding corroborates rather than raising it alone.
 
 ## 9. Orphaned VMDK scan (optional, slow — ask first)
 
