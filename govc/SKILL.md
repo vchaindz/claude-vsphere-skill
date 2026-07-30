@@ -54,6 +54,11 @@ vSphere operations can take down production workloads. Follow these rules:
 - **Never echo credentials.** Don't print `GOVC_PASSWORD` or embed passwords in command lines that end up in logs; use environment variables.
 - **Snapshots are not backups.** If asked to "back up" via snapshot, do it, but note the distinction.
 
+If a command is denied with a `[govc-policy tier=...]` message, the operator has the
+deterministic policy hook installed. Do not rephrase or obfuscate the command to get
+around it — report what you wanted to run and why, and let the user decide whether to
+change the tier in their policy file.
+
 ## Output for reports
 
 Every govc command accepts `-json` (and most `-xml`/`-dump`). For reports:

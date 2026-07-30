@@ -24,7 +24,48 @@ Instructions the skill enforces on every session:
 - **Dry-run mentality** — before bulk operations, Claude prints the object list so you approve a list, not a pattern.
 - **Graceful before hard** — guest shutdown before power-off, guest reboot before reset.
 
-These are instructions, not a permission system. For defense in depth, run govc with a least-privilege vCenter role — with a read-only account the skill physically cannot change anything.
+These are instructions to the model. For deterministic, code-level enforcement on top of them, add the policy hook below — and for a hard boundary, run govc with a least-privilege vCenter role: with a read-only account the skill physically cannot change anything. The three layers compose.
+
+## Deterministic security layer (optional)
+
+`guard/` adds enforcement that does not depend on the model behaving: a
+[PreToolUse hook](https://docs.claude.com/en/docs/claude-code/hooks) classifies every
+`govc` invocation *before it executes* — including every stage of a pipeline — and
+applies a tier from a policy file the agent is blocked from editing:
+
+| Tier | Read (`*.info`, `find`, `collect`, metrics…) | Mutate (create, clone, power-on, migrate…) | Destroy (`vm.destroy`, `snapshot.remove`, hard power-off…) |
+|---|---|---|---|
+| `readonly` | ✅ | ❌ denied | ❌ denied |
+| `standard` | ✅ | ✅ | ❌ denied |
+| `full` | ✅ | ✅ | ⚠️ always requires your confirmation in the UI |
+
+Design choices that make it deterministic rather than advisory:
+
+- **Fail closed.** No policy file, unreadable policy, invalid tier → `readonly`.
+- **Unknown ≠ safe.** A subcommand the classifier doesn't know is treated as a mutation,
+  never as a read. Destructive commands are caught by an explicit list *plus* a suffix
+  heuristic (`rm`, `remove`, `destroy`, `shutdown`, `reboot`, `unregister`), so
+  destructive subcommands added in future govc releases stay covered.
+- **Flag-aware.** `vm.power -on`/`-s`/`-r` is a mutation; `vm.power -off`/`-reset`/
+  `-suspend` is destroy-class. Bare `govc env` (prints `GOVC_PASSWORD`) is denied at
+  every tier.
+- **Policy is root-of-trust.** It lives in `~/.config/govc-guard/policy`, outside any
+  project, and the installer adds settings.json deny rules so the agent cannot edit it
+  with file tools either. `deny =` / `allow =` lines let you tighten or relax individual
+  subcommands.
+
+```bash
+./guard/setup.sh standard    # or: readonly | full
+./guard/test-policy.sh       # classifier + hook protocol + deployment checks
+```
+
+Works with stock govc — no wrapper required — and coexists with the privacy wrapper
+below: the guard decides *whether* a command runs, the wrapper decides *what the model
+sees*. Same honesty as the wrapper: this matches command text, so a deliberately
+hostile agent could obfuscate around it. It guarantees the *normal* path — the model
+can no longer talk itself into a `vm.destroy`, because the deny happens in code after
+it tries. The hard boundary against a hostile agent remains a least-privilege vCenter
+role. Linux/macOS; on Windows run Claude Code from WSL or Git Bash to use it.
 
 ## Requirements
 
@@ -413,6 +454,7 @@ changes.
 | Path | Purpose |
 |---|---|
 | `govc/` | **The skill** — the only thing you need to copy |
+| `guard/` | Optional deterministic security layer: policy hook, installer, tests |
 | `wrapper/` | Optional pseudonymising proxy, hooks, installer, and both test suites |
 | `wrapper/govc-private/` | Companion skill for token-space operation |
 | `examples/` | Generated HTML reports (vcsim), with and without the wrapper |
