@@ -217,11 +217,18 @@ if [ -n "$firstvm" ]; then
     t "metrics: metric.info"       govc metric.info "$firstvm" cpu.usage.average
     t "metrics: daily rollup"      govc metric.sample -i 86400 -n 5 -instance - "$firstvm" cpu.usage.average
     if command -v jq >/dev/null 2>&1; then
-        # -json identifies entities by MoRef only, and percent counters are hundredths
-        t "metrics: -json entity is a MoRef" bash -c \
-          "govc metric.sample -i 86400 -n 5 -instance - -json '$firstvm' cpu.usage.average | jq -e '.sample[0].entity.value' >/dev/null"
-        t "metrics: -json carries unit"      bash -c \
-          "govc metric.sample -i 86400 -n 5 -instance - -json '$firstvm' cpu.usage.average | jq -e '.sample[0].value[0] | has(\"unit\")' >/dev/null"
+        # A VM with no daily history - powered off, or created this week -
+        # returns an empty sample set and exit 0. Asserting .sample[0] would
+        # then report a failure against a perfectly healthy vCenter, so sample
+        # a POWERED-ON VM and assert the shape only when a series came back.
+        metricvm=$(govc find / -type m -runtime.powerState poweredOn | head -1)
+        [ -n "$metricvm" ] || metricvm="$firstvm"
+        # -json identifies entities by MoRef only, never by name
+        t "metrics: -json shape when data exists" bash -c \
+          "govc metric.sample -i 86400 -n 5 -instance - -json '$metricvm' cpu.usage.average |
+             jq -e 'if (.sample | length) == 0 then true
+                    else (.sample[0].entity.value != null)
+                         and (.sample[0].value[0] | has(\"unit\")) end' >/dev/null"
     fi
 fi
 

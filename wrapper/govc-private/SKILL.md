@@ -118,8 +118,8 @@ output.
 
 Read: `about`, `ls`, `find`, `tree`, `collect`, `vm.info`, `host.info`,
 `datastore.info`, `datacenter.info`, `cluster.usage`, `pool.info`,
-`snapshot.tree`, `metric.ls`, `metric.sample`, `metric.info`, `events`, `tasks`,
-`alarms`.
+`snapshot.tree`, `metric.ls`, `metric.sample`, `metric.info`,
+`metric.interval.info`, `events`, `tasks`, `alarms`.
 
 Write: `vm.power`, `vm.migrate`, `snapshot.create`, `snapshot.remove`,
 `host.maintenance.enter`, `host.maintenance.exit`.
