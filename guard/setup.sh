@@ -89,17 +89,28 @@ except Exception as e:
 #
 # File-tool patterns are gitignore-style: "//" is an absolute path, while a
 # single leading "/" would be read as relative to the settings file's own
-# directory and silently protect nothing. The Bash patterns are substring
-# globs (same convention as wrapper/settings-merge.py), scoped to the two
-# installed paths — the hook resolves `cd`, `~` and relative forms itself,
-# so these do not need to match by name and a checkout of this repo stays
-# editable.
+# directory and silently protect nothing. `Edit()` is the only file-tool rule
+# worth writing: Claude Code consults Edit() and Read() rules for every
+# file-editing tool, Write included, and ignores a Write() path rule
+# entirely. The Bash patterns are substring globs (same convention as
+# wrapper/settings-merge.py), scoped to the two installed paths — the hook
+# resolves `cd`, `~` and relative forms itself, so these do not need to match
+# by name and a checkout of this repo stays editable.
 perms = s.setdefault("permissions", {})
 deny = perms.setdefault("deny", [])
+targets = [os.path.abspath(t) for t in (policy, hook_cmd)]
+
+# Earlier versions of this script also emitted a Write() rule per target.
+# Claude Code accepts it, never consults it, and warns about it at startup —
+# a warning that reads like the guard is broken when it is not. Drop those
+# two exact strings on upgrade; every other deny rule, including a Write()
+# rule for any other path, is left alone.
+obsolete = {f"Write(/{t})" for t in targets}
+deny[:] = [r for r in deny if r not in obsolete]
+
 rules = []
-for target in (policy, hook_cmd):
-    target = os.path.abspath(target)
-    rules += [f"Edit(/{target})", f"Write(/{target})", f"Bash(*{target}*)"]
+for target in targets:
+    rules += [f"Edit(/{target})", f"Bash(*{target}*)"]
 for rule in rules:
     if rule not in deny:
         deny.append(rule)

@@ -27,11 +27,15 @@ event() {  # $1 = command
     "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1")"
 }
 
-run() {  # $1 policy-file  $2 command  -> prints decision or "allow"
-  event "$2" | GOVC_GUARD_POLICY="$1" python3 "$HOOK" | \
+run_as() {  # $1 hook  $2 policy-file  $3 command -> prints decision or "allow"
+  event "$3" | GOVC_GUARD_POLICY="$2" python3 "$1" | \
     python3 -c 'import json,sys
 raw = sys.stdin.read()
 print(json.loads(raw)["hookSpecificOutput"]["permissionDecision"] if raw.strip() else "allow")'
+}
+
+run() {  # $1 policy-file  $2 command  -> prints decision or "allow"
+  run_as "$HOOK" "$1" "$2"
 }
 
 # missing policy file -> fail closed to readonly
@@ -62,6 +66,11 @@ echo "tier = full"     > "$TMP/full"
 [ "$(run "$TMP/full" 'govc env -json')"        = deny  ] && pass "govc env -json denied too"   || fail "govc env -json leak"
 [ "$(run "$TMP/ro"   'govc env GOVC_URL')"     = allow ] && pass "govc env NAME still allowed" || fail "govc env NAME"
 [ "$(run "$TMP/std"  'ls -la && cat /etc/os-release')" = allow ] && pass "non-govc untouched" || fail "non-govc command touched"
+
+# a read verb carrying a flag that writes
+[ "$(run "$TMP/ro"   'govc alarms -json')"      = allow ] && pass "readonly allows alarms read"   || fail "alarms read"
+[ "$(run "$TMP/ro"   'govc alarms -ack /DC1')"  = deny  ] && pass "readonly denies alarms -ack"   || fail "alarms -ack fails open at readonly"
+[ "$(run "$TMP/std"  'govc alarms -ack /DC1')"  = allow ] && pass "standard allows alarms -ack"   || fail "alarms -ack at standard"
 
 # indirection: subcommand not literally present after `govc`
 [ "$(run "$TMP/std"  'printf "vm.destroy\n" | xargs govc')" = deny ] \
@@ -95,11 +104,20 @@ chmod +x "$TMP"/*.sh
   && pass "missing script is not an error" || fail "missing script"
 
 # a checkout of this repo stays editable — only the installed paths are the
-# guard's own files
-[ "$(run "$TMP/std" 'python3 guard/govc-policy.py --selftest')" = allow ] \
+# guard's own files. These two run through a hook installed *outside* the
+# tree, because that is the claim: a hook executing from the repo copy is
+# that copy's own protector and refuses to be reverted — correct behaviour,
+# but the opposite configuration from the one being asserted here.
+INSTALLED="$TMP/installed-hook.py"
+cp "$HOOK" "$INSTALLED"
+[ "$(run_as "$INSTALLED" "$TMP/std" 'python3 guard/govc-policy.py --selftest')" = allow ] \
   && pass "repo copy is not the installed hook" || fail "repo copy blocked"
-[ "$(run "$TMP/std" 'git checkout guard/govc-policy.py')" = allow ] \
+[ "$(run_as "$INSTALLED" "$TMP/std" 'git checkout guard/govc-policy.py')" = allow ] \
   && pass "repo copy is revertable" || fail "git checkout blocked"
+# ...and the converse, so the two above cannot be made to pass by dropping
+# __file__ from GUARD_FILES: whichever copy is running protects its own path
+[ "$(run_as "$INSTALLED" "$TMP/std" "git checkout $INSTALLED")" = deny ] \
+  && pass "the running hook protects its own path" || fail "running hook not self-protected"
 
 # the guard protects its own files at every tier
 [ "$(run "$TMP/full" "echo 'tier = full' > $TMP/full")" = deny ] \

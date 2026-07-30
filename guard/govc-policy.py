@@ -160,6 +160,23 @@ DESTROY_SUFFIXES = ("rm", "remove", "destroy", "shutdown", "reboot",
 # production VM down, but the VM still goes down, so the operator confirms.
 POWER_DESTROY_FLAGS = {"-off", "-reset", "-suspend", "-s", "-r"}
 
+# Flags that turn an otherwise read-class subcommand into a state change.
+# `govc alarms` lists triggered alarms, which is why it is in READ_EXACT — but
+# `govc alarms -ack` acknowledges them, clearing the operator's own warning
+# signal, and a health check that "helpfully" acknowledges leaves no trace of
+# it in the report it produces. Matched through flag_names, so `--ack` and
+# `-ack=true` count — and so does `-ack=false`, which over-classifies a
+# command nobody writes. That is the same fail-closed trade as `-off=false`
+# under POWER_DESTROY_FLAGS.
+#
+# Every other verb in READ_EXACT was checked against govc 0.53.0 for this
+# shape and none of them has a mutating flag (`session.ls -r` lists the cached
+# REST session, `guest.ps -X` waits for a process rather than killing it). The
+# table exists so the next one is a line here, not a second special case.
+READ_MUTATE_FLAGS = {
+    "alarms": {"-ack"},
+}
+
 # `govc env` prints GOVC_PASSWORD in cleartext under every output flag
 # (-json, -dump, -x, ...); only naming a single non-secret variable is safe
 ENV_SENSITIVE = re.compile(r"\bGOVC_PASSWORD\b", re.I)
@@ -196,6 +213,24 @@ CALL_RE = re.compile(
     r"(?![\w.-])")
 
 
+def flag_names(args):
+    """The flag tokens as Go's flag package would see them.
+
+    Go accepts one *or two* leading minus signs for the same flag — "One or
+    two minus signs may be used; they are equivalent" — so `--off` is `-off`
+    and matching only the single-dash spelling is a bypass, not a nicety.
+    (Three or more is a parse error in Go, so `---off` needs no handling.)
+    `-flag=value` names the same flag as `-flag`.
+    """
+    out = set()
+    for a in args:
+        a = a.lower().split("=", 1)[0]
+        if a.startswith("--"):
+            a = a[1:]
+        out.add(a)
+    return out
+
+
 def classify(subcommand, args, allow):
     """-> 'read' | 'mutate' | 'destroy'."""
     sc = subcommand.lower()
@@ -212,9 +247,10 @@ def classify(subcommand, args, allow):
         return "destroy"
 
     if sc == "vm.power":
-        # Go accepts -off, -off=true and -off=1 for the same boolean flag,
-        # and a flag that is still $EXPANDED could turn out to be any of them
-        flags = {a.lower().split("=", 1)[0] for a in args}
+        # Go accepts -off, --off, -off=true and -off=1 for the same boolean
+        # flag (see flag_names), and a flag that is still $EXPANDED could
+        # turn out to be any of them
+        flags = flag_names(args)
         cls = ("destroy" if (flags & POWER_DESTROY_FLAGS
                              or any(c in a for a in args for c in "$`"))
                else "mutate")
@@ -222,6 +258,20 @@ def classify(subcommand, args, allow):
         cls = "destroy"
     elif sc in READ_EXACT or sc.endswith(".info") or sc.endswith(".ls"):
         cls = "read"
+        mutating = READ_MUTATE_FLAGS.get(sc)
+        if mutating and (mutating & flag_names(args)
+                         or any(c in a for a in args for c in "$`")):
+            # Any argument the shell has not finished with escalates too —
+            # the same rule vm.power uses, because `OPTS=-ack; govc alarms
+            # $OPTS /DC1` acknowledges alarms just as surely as spelling the
+            # flag out. The cost is that a path passed through a variable
+            # (`govc alarms "$dc"` in a loop) is denied at readonly, and
+            # that cost is worth nothing to avoid: triggered alarms are
+            # propagated up the inventory hierarchy and PATH already
+            # defaults to `/`, so a bare `govc alarms` returns every
+            # triggered alarm in the environment. Use the bare form for
+            # reporting and the question never comes up.
+            cls = "mutate"
     else:
         cls = "mutate"  # unknown never passes as read — fail closed
 
@@ -331,11 +381,21 @@ def extract_invocations(cmd):
         tail = cmd[m.end():]
         # cut at the next shell separator so one invocation's args don't
         # bleed into the next
-        tail = re.split(r"[|;&`)]|&&|\|\|", tail, maxsplit=1)[0]
+        sep = re.search(r"[|;&`)]|&&|\|\|", tail)
+        tail, delim = ((tail[:sep.start()], sep.group(0)) if sep
+                       else (tail, ""))
         try:
             toks = shlex.split(tail)
         except ValueError:
             toks = tail.split()
+        if delim == "`":
+            # The cut landed on a command substitution inside this
+            # invocation's own arguments — `govc alarms `echo -ack` /DC1`.
+            # Dropping it would hand classify() a flagless `alarms` and call
+            # it a read, so pass the tick along as an argument and let the
+            # unresolved-argument checks see it. `$(...)` needs no such help:
+            # that cut lands on the `)`, which leaves the `$(` in the tokens.
+            toks.append("`")
         if not toks:
             yield ("", [])
             continue
@@ -489,8 +549,36 @@ def selftest():
         ("govc vm.power -suspend=true my-vm",        "standard", "deny"),
         ("govc vm.power -reset=TRUE my-vm",          "standard", "deny"),
         ("govc vm.power -on=true my-vm",             "standard", None),
+        # ...and Go treats one and two minus signs as the same flag
+        ("govc vm.power --off my-vm",                "standard", "deny"),
+        ("govc vm.power --off=true my-vm",           "standard", "deny"),
+        ("govc vm.power --suspend my-vm",            "standard", "deny"),
+        ("govc vm.power --s my-vm",                  "standard", "deny"),
+        ("govc vm.power --off my-vm",                "full",     "ask"),
+        ("govc vm.power --on my-vm",                 "standard", None),
+        ("govc vm.power --on my-vm",                 "readonly", "deny"),
         # a flag that is only known at runtime could be any of them
         ("govc vm.power $FLAG my-vm",                "standard", "deny"),
+        # a read verb with a flag that writes: `alarms` lists them,
+        # `alarms -ack` acknowledges them
+        ("govc alarms",                              "readonly", None),
+        ("govc alarms -l /DC1",                      "readonly", None),
+        ("govc alarms -json | jq '.[]'",             "readonly", None),
+        # a path through a variable could expand to the flag, so it escalates
+        # — use the bare `govc alarms` (root, propagated) for reporting
+        ('govc alarms "$dc"',                        "readonly", "deny"),
+        ("govc alarms $OPTS /DC1",                   "readonly", "deny"),
+        ("govc alarms `echo -ack` /DC1",             "readonly", "deny"),
+        ('govc alarms "$dc"',                        "standard", None),
+        ("govc alarms -ack /DC1",                    "readonly", "deny"),
+        ("govc alarms -ack=true /DC1",               "readonly", "deny"),
+        ("govc alarms -ack -n alarm.X vm/x",         "readonly", "deny"),
+        ("govc alarms --ack /DC1",                   "readonly", "deny"),
+        ("govc alarms --ack=true /DC1",              "readonly", "deny"),
+        ("govc alarms -$FLAG /DC1",                  "readonly", "deny"),
+        # acknowledging is a change, not a destruction — no ask-gate at full
+        ("govc alarms -ack /DC1",                    "standard", None),
+        ("govc alarms -ack /DC1",                    "full",     None),
         ("govc vm.destroy my-vm",                    "standard", "deny"),
         ("govc snapshot.remove -vm x '*'",           "standard", "deny"),
         ("govc snapshot.revert -vm x",               "standard", "deny"),
