@@ -405,19 +405,34 @@ def extract_invocations(cmd):
         # cut at the next shell separator so one invocation's args don't
         # bleed into the next
         sep = re.search(r"[|;&`)]|&&|\|\|", tail)
-        tail, delim = ((tail[:sep.start()], sep.group(0)) if sep
-                       else (tail, ""))
+        tail, delim, rest = ((tail[:sep.start()], sep.group(0),
+                              tail[sep.end():]) if sep else (tail, "", ""))
         try:
             toks = shlex.split(tail)
         except ValueError:
             toks = tail.split()
-        if delim == "`":
+        if delim == "`" and "`" in rest.split("\n", 1)[0]:
             # The cut landed on a command substitution inside this
             # invocation's own arguments — `govc alarms `echo -ack` /DC1`.
             # Dropping it would hand classify() a flagless `alarms` and call
             # it a read, so pass the tick along as an argument and let the
             # unresolved-argument checks see it. `$(...)` needs no such help:
             # that cut lands on the `)`, which leaves the `$(` in the tokens.
+            #
+            # A *complete pair* on the same line is what marks a substitution.
+            # A lone tick is the closing delimiter of an enclosing span, as in
+            # prose that quotes `govc alarms -json` in markdown — and this
+            # text is scanned in heredocs, commit messages and script bodies,
+            # not just in commands. Requiring the pair keeps the bypass shut
+            # while letting documentation about govc be written in a heredoc.
+            #
+            # Residual, measured: prose that quotes two govc commands in
+            # backticks on ONE line still escalates the first, because the
+            # second span's opening tick looks like a closing one. It only
+            # matters when that first command is `alarms` or `vm.power` — the
+            # two whose flags change classification — and it fails closed.
+            # Distinguishing shell substitution from markdown in arbitrary
+            # text is not decidable; this is the honest edge of the heuristic.
             toks.append("`")
         if not toks:
             yield ("", [])
@@ -592,6 +607,16 @@ def selftest():
         ('govc alarms "$dc"',                        "readonly", "deny"),
         ("govc alarms $OPTS /DC1",                   "readonly", "deny"),
         ("govc alarms `echo -ack` /DC1",             "readonly", "deny"),
+        ("govc alarms `echo -ack`",                  "readonly", "deny"),
+        # ...but a lone tick closing a markdown span is not a substitution.
+        # This text is scanned in heredocs and commit messages too, so prose
+        # about govc must stay writable.
+        ("echo 'see `govc alarms -json` for the shape'",
+                                                     "readonly", None),
+        ("printf '%s' 'the `govc alarms` output is a bare array'",
+                                                     "readonly", None),
+        ("X=`govc alarms`",                          "readonly", None),
+        ("govc vm.power `echo -off` vm",             "standard", "deny"),
         ('govc alarms "$dc"',                        "standard", None),
         ("govc alarms -ack /DC1",                    "readonly", "deny"),
         ("govc alarms -ack=true /DC1",               "readonly", "deny"),
