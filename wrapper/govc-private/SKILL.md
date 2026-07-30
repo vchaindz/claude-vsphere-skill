@@ -134,20 +134,50 @@ themselves.
 
 ## Health check
 
-Six counts, no identifiers:
+The same nine checks as the plain govc skill, in the same order, as counts — no
+identifiers. Thresholds, severities, the report structure and the baseline diff
+are **not** repeated here: they live in the plain skill's
+`references/health-check.md`, and if that file and this section ever disagree,
+that file wins.
 
 ```bash
-govc-safe alarms | wc -l                                                # triggered alarms
-govc-safe find / -type h -runtime.connectionState notResponding | wc -l # dead hosts
-govc-safe find / -type h -runtime.inMaintenanceMode true | wc -l
-govc-safe find / -type m -snapshot.currentSnapshot '*' | wc -l          # snapshot sprawl
-govc-safe find / -type m -runtime.consolidationNeeded true | wc -l
-govc-safe datastore.info -json | jq -r '.datastores[] |
-  select(1 - (.summary.freeSpace/.summary.capacity) > 0.85) | .name' | wc -l
+govc-safe find / -type h | wc -l                                        # 1 hosts total
+govc-safe find / -type h -runtime.connectionState connected | wc -l     #   ...connected
+govc-safe find / -type h -runtime.inMaintenanceMode true | wc -l        #   ...in maintenance
+govc-safe alarms -json | jq '[.[]? | select(.overallStatus == "red")] | length'  # 2 red alarms
+govc-safe datastore.info -json | jq '[.datastores[]
+  | select(.summary.capacity > 0)
+  | select(1 - (.summary.freeSpace / .summary.capacity) > 0.85)] | length'       # 3 over 85%
+govc-safe find / -type m -snapshot.currentSnapshot '*' | wc -l          # 4 VMs with snapshots
+govc-safe find / -type m -runtime.consolidationNeeded true | wc -l      #   ...needing consolidation
+govc-safe find / -type m -runtime.powerState poweredOn | tr '\n' '\0' |
+  xargs -0 govc-safe vm.info -json | jq '[.virtualMachines[]
+  | select((.guest.toolsRunningStatus // "") != "guestToolsRunning")] | length'  # 5 Tools down
+govc-safe find / -type c | while IFS= read -r c; do
+  govc-safe collect -json "$c" configurationEx |
+  jq -r '.[0].val.dasConfig.enabled'; done | grep -c false                # 6 clusters, HA off
+govc-safe find / -type m -runtime.connectionState orphaned | wc -l       # 7 (also: inaccessible,
+                                                                         #    invalid)
+govc-safe events -n 500 -l -json | jq -s '[.[] | select(.category == "error")] | length'  # 8
+# 9 (orphaned-VMDK scan) is slow and opt-in — ask first, never in an unattended run
 ```
 
-Report the numbers, then offer to list the tokens for any category the user
-wants to act on.
+`grep -c false` exits 1 when the count is zero. That is not a failure — it means
+every cluster has HA on. Ask for `configurationEx` whole: the nested form
+`collect -s "$c" configurationEx.dasConfig.enabled` fails on a real vCenter with
+`ServerFaultCode: InvalidProperty`.
+
+Two rules override the checklist in token space:
+
+- **Counts before names.** Lead with one number per check, then offer to list the
+  tokens for any category the user wants to act on. Printing tokens is safe —
+  that is what the wrapper is for — but a nine-check report opening with 400
+  tokens is unreadable.
+- **`-json` only.** Plain-text output has no structure to redact against, so a VM
+  named after a field label can have the label tokenised alongside it.
+
+The report and the baseline file are written in tokens; say so in the footer and
+mention `govc-safe rehydrate <file>`.
 
 ## Reporting
 

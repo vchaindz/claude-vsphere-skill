@@ -151,39 +151,13 @@ Good audit answers: "who deleted VM X?" → `govc events -type VmRemovedEvent`; 
 VM reboot?" → `govc events vm/my-vm | grep -i reboot` (PowerShell:
 `govc events vm/my-vm | Select-String reboot`).
 
-## Health-check playbook
+## Health checks
 
-A quick environment health sweep:
+A health check is not an ad-hoc selection of the queries above — it is a fixed, ordered
+checklist, so that two runs are comparable, plus a baseline diff so that "what changed
+since yesterday" is answerable at all. It lives in `references/health-check.md`.
 
-```bash
-govc about                                        # version/build
-govc alarms                                       # anything red/yellow?
-govc find / -type h -runtime.connectionState notResponding   # dead hosts
-govc find / -type h -runtime.inMaintenanceMode true          # hosts in maintenance
-govc find / -type m -snapshot.currentSnapshot '*' # snapshot sprawl
-govc find / -type m -runtime.consolidationNeeded true        # disks needing consolidation
-govc events -n 100 -type com.vmware.vc.HA.FailoverEvent      # recent HA events
-
-# datastores over 85% full
-govc datastore.info -json | jq -r '.datastores[] |
-  select(1 - (.summary.freeSpace / .summary.capacity) > 0.85) |
-  [.name, ((1 - .summary.freeSpace / .summary.capacity) * 100 | floor)] | @tsv'
-```
-
-```powershell
-govc about
-govc alarms
-govc find / -type h '-runtime.connectionState' notResponding
-govc find / -type h '-runtime.inMaintenanceMode' true
-govc find / -type m '-snapshot.currentSnapshot' '*'
-govc find / -type m '-runtime.consolidationNeeded' true
-govc events -n 100 -type com.vmware.vc.HA.FailoverEvent
-
-# datastores over 85% full
-(govc datastore.info -json | ConvertFrom-Json).datastores |
-  Where-Object { (1 - $_.summary.freeSpace / $_.summary.capacity) -gt 0.85 } |
-  Select-Object name,
-    @{n='UsedPct';e={[math]::Floor((1 - $_.summary.freeSpace / $_.summary.capacity) * 100)}}
-```
-
-Summarize findings by severity; propose (but don't execute) remediation.
+Read that file whenever the user asks for a health check, a morning report, or "how is the
+environment". Do not assemble your own sweep from the commands on this page: a list you
+improvise is a list nobody can compare against, and it will quietly omit the checks that
+fire least often and cost most when missed — orphaned VMs, and cluster HA state.

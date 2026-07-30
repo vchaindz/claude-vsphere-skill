@@ -1,6 +1,6 @@
 ---
 name: govc
-description: Control, report on, and manage VMware vSphere/ESXi environments using the govc CLI. Use this skill whenever the user mentions vSphere, vCenter, ESXi, VMware, virtual machines on VMware, govc, vMotion, DRS, HA, vSAN, datastores, snapshots, OVA/OVF, or asks to inventory, report, power on/off, clone, migrate, snapshot, or troubleshoot anything in a VMware environment — even if they don't say "govc" explicitly.
+description: Control, report on, and manage VMware vSphere/ESXi environments using the govc CLI. Use this skill whenever the user mentions vSphere, vCenter, ESXi, VMware, virtual machines on VMware, govc, vMotion, DRS, HA, vSAN, datastores, snapshots, OVA/OVF, or asks for a health check, a morning report, patch-day or maintenance-window preparation, or asks to inventory, report, power on/off, clone, migrate, snapshot, or troubleshoot anything in a VMware environment — even if they don't say "govc" explicitly.
 ---
 
 # govc — VMware vSphere management from the CLI
@@ -60,6 +60,60 @@ deterministic policy hook installed. Do not rephrase or obfuscate the command to
 around it — report what you wanted to run and why, and let the user decide whether to
 change the tier in their policy file.
 
+## Unattended runs
+
+If the prompt says "unattended", "no questions", "use defaults", "scheduled", or names a
+directory to write to and nobody to ask, you are running without an operator — and under a
+`dontAsk` permission mode you also *cannot* ask, because the question tool is denied. A
+question is then not a pause, it is a failed run.
+
+**"Unattended" removes the question, never the boundary.**
+
+Decide these yourself, silently:
+
+- Skip every step a reference file marks optional or slow, and say in the report that you
+  skipped it and why.
+- Apply the default thresholds from `references/report-template.md`.
+- Write to the directory named in the prompt, using the standard filename
+  `<report-type>-<environment>-<YYYY-MM-DD>.html`. Use the file-writing tool, not shell
+  redirection.
+- Overwrite a same-named file from an earlier run today.
+- Treat a documented benign error as data: an empty datacenter answering
+  `datastore '*' not found` means "no datastores here", not a failure.
+- Record a query that failed as "not collected", with the reason, and carry on.
+
+Refuse these, unattended or not:
+
+- **Any command that is not read-only.** Unattended mode authorises no mutation, ever. If
+  the prompt asks for remediation, do the read-only part, write the report, and put the
+  change in it as a recommendation with the exact command — do not run it.
+- **Proceeding when `govc about` fails.** No data is not the same as no findings.
+- **Inventing a number** to fill a KPI card or a table cell.
+- **Writing outside the directory the prompt named.**
+
+None of this weakens the safety rules above. Those protect *vSphere* — confirm before a
+destructive call, list the objects before a bulk operation — and an unattended run cannot
+reach them, because it may not issue a non-read command at all. What it decides on its own
+is a local file write and a default threshold.
+
+End your output with one machine-readable line, as the very last line, so a wrapper can act
+on it without parsing prose:
+
+```
+GOVC-REPORT report=health-check env=acme-prod status=critical critical=2 warning=5 ok=4 info=1 baseline=changed path=/var/lib/vsphere-health/health-check-acme-prod-2026-07-30.html
+```
+
+- `status` is the worst severity found: `critical`, `warning`, `ok`, or `error` when the run
+  could not collect data.
+- `baseline` is `first-run`, `unchanged`, or `changed`.
+- `path=` comes last and unquoted, so a path containing spaces is everything after `path=`.
+  Use `path=-` when no file was written.
+- Emit the line even on failure:
+  `GOVC-REPORT report=health-check env=acme-prod status=error critical=0 warning=0 ok=0 info=0 baseline=unknown path=-`
+
+The operator's side of this — schedulers, and the permission rules that keep an unattended
+run from stalling — is in `docs/scheduled-reports.md` in the project repository.
+
 ## Output for reports
 
 Every govc command accepts `-json` (and most `-xml`/`-dump`). For reports:
@@ -97,6 +151,7 @@ Read the reference file matching the task — each contains commands, tested pat
 | Snapshots: create, revert, remove, tree, audit | `references/snapshots.md` |
 | Hosts and clusters: maintenance, DRS/HA, rules, resource pools, esxcli | `references/host-cluster.md` |
 | Datastores, disks, networking (vSwitch/DVS/portgroups) | `references/storage-network.md` |
+| Environment health check: the fixed nine-check list, severities, baseline diff | `references/health-check.md` |
 | HTML report deliverables: template, severity rules, structure | `references/report-template.md` |
 
 ## Quick command map

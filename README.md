@@ -23,6 +23,7 @@ Instructions the skill enforces on every session:
 - **Confirmation for destructive operations** — `vm.destroy`, `snapshot.remove '*'`, `datastore.rm`, `host.shutdown` and friends require Claude to show the exact objects affected and get an explicit yes.
 - **Dry-run mentality** — before bulk operations, Claude prints the object list so you approve a list, not a pattern.
 - **Graceful before hard** — guest shutdown before power-off, guest reboot before reset.
+- **Unattended runs keep the boundary** — a scheduled report run may pick default thresholds and write its own report file, but it may not issue a single non-read command; see [`docs/scheduled-reports.md`](docs/scheduled-reports.md).
 
 These are instructions to the model. For deterministic, code-level enforcement on top of them, add the policy hook below — and for a hard boundary, run govc with a least-privilege vCenter role: with a read-only account the skill physically cannot change anything. The three layers compose.
 
@@ -192,16 +193,16 @@ To persist on Linux/macOS, add the `export` lines to `~/.zshrc` (macOS default s
 `vcsim`, the vCenter simulator from the govmomi project, answers nearly all govc calls with a simulated inventory. The included test scripts set everything up and validate the skill's command patterns:
 
 ```powershell
-# Windows: installs govc + vcsim, installs the skill, runs 15 smoke tests against the simulator
+# Windows: installs govc + vcsim, installs the skill, runs 24 smoke tests against the simulator
 powershell -ExecutionPolicy Bypass -File .\test-windows.ps1
 ```
 
 ```bash
-# Linux/macOS: installs govc + vcsim + the skill, runs 21 smoke tests against the simulator.
+# Linux/macOS: installs govc + vcsim + the skill, runs 31 smoke tests against the simulator.
 # No vCenter and no credentials needed — nothing real is touched.
 ./test-unix.sh --vcsim
 
-# Or against your real vCenter: ~18 READ-ONLY tests
+# Or against your real vCenter: ~28 READ-ONLY tests
 ./test-unix.sh
 # optional snapshot create/remove cycle on an explicitly named non-production VM:
 ./test-unix.sh --write-test my-test-vm
@@ -218,7 +219,8 @@ govc/
 │   └── report-template.html      # self-contained styled HTML report skeleton
 └── references/                   # loaded on demand (progressive disclosure)
     ├── setup.md                  # install, auth, TLS, sessions, troubleshooting, vcsim
-    ├── inventory-reporting.md    # find/collect/jq patterns, metrics, events, health checks
+    ├── inventory-reporting.md    # find/collect/jq patterns, metrics, events, alarms
+    ├── health-check.md           # the fixed nine-check checklist, severities, baseline diff
     ├── report-template.md        # how report files are structured, severities, thresholds
     ├── vm-lifecycle.md           # create, clone, power, migrate, guest ops, destroy
     ├── snapshots.md              # create, audit, revert, cleanup workflow
@@ -243,9 +245,40 @@ against the vcsim simulator:
 Open them side by side: same findings, same numbers, same layout — the only difference is
 whether a real identifier ever left the host.
 
-Battle-tested details baked in from real-world runs: PowerShell splits unquoted dotted flags like `-runtime.powerState` (quote them), `host.info` needs an explicit host when there's more than one, multi-datacenter vCenters need `-dc`/`GOVC_DATACENTER` context, an empty datacenter answers `datastore.info` with a misleading "not found", `snapshot.remove` rejects the `id` integer that `vm.info -json` shows and wants the `snapshot-NNNNN` managed object ID instead, and a snapshot audit must recurse into `childSnapshotList` or it reports a deep chain as a single snapshot.
+Battle-tested details baked in from real-world runs: PowerShell splits unquoted dotted flags like `-runtime.powerState` (quote them), `host.info` needs an explicit host when there's more than one, multi-datacenter vCenters need `-dc`/`GOVC_DATACENTER` context, an empty datacenter answers `datastore.info` with a misleading "not found", `snapshot.remove` rejects the `id` integer that `vm.info -json` shows and wants the `snapshot-NNNNN` managed object ID instead, a snapshot audit must recurse into `childSnapshotList` or it reports a deep chain as a single snapshot, `jq`'s `fromdateiso8601` rejects the fractional seconds vSphere puts in every timestamp, `govc events` has no time window at all — only a count — and `govc cluster.info` does not exist, so HA and DRS state come from `govc collect -json <cluster> configurationEx` — read whole, because the nested path a simulator happily accepts fails on a real vCenter with `InvalidProperty`.
 
 Every reference file is cross-platform: bash examples work on Linux, macOS, WSL, and Git Bash, and each command that behaves differently under native PowerShell carries a `powershell` twin. Batch pipelines use `tr '\n' '\0' | xargs -0` rather than the GNU-only `xargs -d '\n'`, so they run unmodified on macOS and survive VM names containing spaces.
+
+## Scheduled and unattended reports
+
+The health check is a **fixed nine-check list** — same checks, same order, same thresholds
+every run — so two runs are comparable, and it writes a small baseline file next to the
+report so the next run can lead with "changed since last run". That is what makes it worth
+scheduling:
+
+```bash
+claude -p "/govc Run the fixed environment health check. Unattended: no questions,
+use defaults, write the HTML report to /var/lib/vsphere-health." \
+  --permission-mode dontAsk --max-turns 40
+```
+
+The last line of output is machine-readable, so a cron wrapper can act on it without
+parsing prose:
+
+```
+GOVC-REPORT report=health-check env=acme-prod status=critical critical=2 warning=5 ok=4 info=1 baseline=changed path=/var/lib/vsphere-health/health-check-acme-prod-2026-07-30.html
+```
+
+Pre-authorise rather than bypass: an allowlist plus `--permission-mode dontAsk` means an
+unforeseen command *fails loudly* instead of executing unattended — the opposite of what
+`--dangerously-skip-permissions` gives you, which in any case refuses to start under
+root or `sudo` and so never runs from a root crontab at all. Pair it with guard tier
+`readonly` and a read-only vCenter account, and the job cannot change vSphere even if the
+model tries.
+
+Full recipes — cron, systemd timers, Windows Task Scheduler, the settings block with the
+five rules people get wrong, and turn-limit guidance — are in
+[`docs/scheduled-reports.md`](docs/scheduled-reports.md).
 
 ## Optional: keeping real identifiers away from the model
 
@@ -474,6 +507,7 @@ changes.
 | `wrapper/` | Optional pseudonymising proxy, hooks, installer, and both test suites |
 | `wrapper/govc-private/` | Companion skill for token-space operation |
 | `examples/` | Generated HTML reports (vcsim), with and without the wrapper |
+| `docs/` | Operator documentation that is not part of the skill (scheduled runs) |
 | `test-windows.ps1` | Windows setup + smoke test against vcsim |
 | `test-unix.sh` | Linux/macOS setup + smoke test against vcsim (`--vcsim`) or a real vCenter |
 | `images/` | Screenshots |
