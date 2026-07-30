@@ -17,7 +17,7 @@
     {{ENVIRONMENT_NAME}}   e.g. "ACME Production", or the vCenter FQDN
     {{VCENTER}}            vCenter/ESXi endpoint (from `govc about`)
     {{VSPHERE_VERSION}}    product name + version + build (from `govc about`)
-    {{GENERATED_AT}}       ISO 8601 local time, e.g. 2026-07-30 09:15 CEST
+    {{GENERATED_AT}}       local time with zone, e.g. 2026-07-30 09:15 CEST
     {{SCOPE}}              what was inspected, e.g. "2 datacenters · 3 clusters · 14 hosts · 412 VMs"
     {{KPI_CARDS}}          repeat the .kpi block
     {{FINDINGS_ROWS}}      repeat the findings <tr> block
@@ -29,6 +29,9 @@
     sev-warning   — should be addressed (approaching threshold, best-practice violation)
     sev-ok        — checked and healthy
     sev-info      — contextual information, no action
+
+  HTML-escape every value taken from vSphere before inserting it (& < > "), including
+  inside <code> tags — object names and annotations are free text, not markup.
 
   Every <table> with class "sortable" gets click-to-sort headers automatically.
   Numeric cells: add class "num" (right-aligned, sorted numerically —

@@ -11,8 +11,10 @@ answers, a Markdown table is still fine; the template is for deliverables.
    numbers before touching the template. Never invent values — every number in the
    report must come from a command you actually ran.
 2. **Read `assets/report-template.html`** and use it as the skeleton. Keep the CSS and
-   the sort script unchanged; replace only the `{{TOKEN}}` placeholders and remove the
-   inline `<!-- example -->` comments.
+   the sort script byte-for-byte unchanged; replace only the `{{TOKEN}}` placeholders.
+   Strip both kinds of authoring scaffolding: the instruction comment in `<head>` and the
+   inline `<!-- example -->` blocks. A deliverable that still explains how to fill itself
+   is not a deliverable.
 3. **Write the finished report** to the location the user asked for, named
    `<report-type>-<environment>-<YYYY-MM-DD>.html`
    (e.g. `snapshot-audit-acme-prod-2026-07-30.html`).
@@ -24,9 +26,9 @@ answers, a Markdown table is still fine; the template is for deliverables.
 |---|---|
 | `{{REPORT_TITLE}}` | Report type, e.g. "Environment Health Check" |
 | `{{ENVIRONMENT_NAME}}` | User-supplied name, else the vCenter FQDN |
-| `{{VCENTER}}` | Endpoint host from `GOVC_URL` |
+| `{{VCENTER}}` | Endpoint host from `GOVC_URL`. Under the privacy wrapper the endpoint is not visible to you — write "not exposed (govc-safe)" rather than guessing |
 | `{{VSPHERE_VERSION}}` | `govc about` — product, version, build |
-| `{{GENERATED_AT}}` | Local time, `date '+%Y-%m-%d %H:%M %Z'` / `Get-Date -Format 'yyyy-MM-dd HH:mm'` |
+| `{{GENERATED_AT}}` | Local time with zone, `date '+%Y-%m-%d %H:%M %Z'` / `Get-Date -Format 'yyyy-MM-dd HH:mm K'` |
 | `{{SCOPE}}` | Counts from discovery, e.g. "2 datacenters · 3 clusters · 14 hosts · 412 VMs" |
 | `{{KPI_CARDS}}` | 3–6 headline numbers (see below) |
 | `{{FINDINGS_ROWS}}` | One `<tr>` per finding, worst first |
@@ -90,6 +92,13 @@ client), additionally:
 
 ## Rules
 
+- **Escape every value that came from vSphere.** Object names, snapshot descriptions,
+  annotations and guest hostnames are attacker-influenced free text, not trusted markup.
+  Replace `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`, `"` → `&quot;` in every value you
+  interpolate — including inside `<code>` tags, which do not escape anything. A datastore
+  named `Backup & Archive` otherwise renders wrong, and a VM named
+  `<img src=x onerror=alert(1)>` becomes live script in a file the admin opens locally.
+  Escape first, then wrap in tags.
 - **Never fabricate a value.** If a query failed or a metric is unavailable, write "not
   collected" and say why in the section `.desc`.
 - **The report must state how data was gathered** (footer + per-section source
@@ -98,3 +107,15 @@ client), additionally:
   bundled sort script.
 - With the privacy wrapper active, tokens like `VM-0001` will appear in the report —
   that is expected; mention `govc-safe rehydrate <file>` to the user for a cleartext copy.
+  The wrapper also hides the endpoint and the real environment name, so `{{VCENTER}}` is
+  "not exposed (govc-safe)" and `{{ENVIRONMENT_NAME}}` is the datacenter token (`DC-01`)
+  or a name the user gave you. Say in the footer that the wrapper was active, otherwise
+  the reader cannot tell a token from a real name.
+
+## Worked examples
+
+The project repository (not the installed skill) carries a matched pair under `examples/`,
+generated against the vcsim simulator: the same health check rendered with real names, and
+again through the privacy wrapper. They are the reference for structure, `.desc` wording
+and severity usage — worth a look if you have the repository to hand, but everything
+needed to fill the template is in this file.

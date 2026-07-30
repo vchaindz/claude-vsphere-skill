@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Environment Health Check — vcsim simulated environment</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --ink: #1c2733; --muted: #5f6b7a;
+    --line: #e3e7ec; --accent: #0b6bcb;
+    --critical: #c62828; --critical-bg: #fdecea;
+    --warning: #b26a00; --warning-bg: #fff4e0;
+    --ok: #2e7d32; --ok-bg: #e8f5e9;
+    --info: #37474f; --info-bg: #eceff1;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 24px 64px; }
+
+  /* ---------- header ---------- */
+  header { border-bottom: 3px solid var(--accent); padding-bottom: 18px; margin-bottom: 24px; }
+  header h1 { margin: 0 0 4px; font-size: 26px; letter-spacing: -0.3px; }
+  header .env { font-size: 17px; color: var(--accent); font-weight: 600; }
+  .meta { display: flex; flex-wrap: wrap; gap: 6px 28px; margin-top: 10px;
+          font-size: 13px; color: var(--muted); }
+  .meta b { color: var(--ink); font-weight: 600; }
+
+  /* ---------- KPI cards ---------- */
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+          gap: 12px; margin: 24px 0; }
+  .kpi { background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+         padding: 14px 16px; }
+  .kpi .n { font-size: 26px; font-weight: 700; line-height: 1.2; }
+  .kpi .l { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .kpi.sev-critical .n { color: var(--critical); }
+  .kpi.sev-warning  .n { color: var(--warning); }
+  .kpi.sev-ok       .n { color: var(--ok); }
+
+  /* ---------- badges ---------- */
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px;
+           font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .badge.sev-critical { color: var(--critical); background: var(--critical-bg); }
+  .badge.sev-warning  { color: var(--warning);  background: var(--warning-bg); }
+  .badge.sev-ok       { color: var(--ok);       background: var(--ok-bg); }
+  .badge.sev-info     { color: var(--info);     background: var(--info-bg); }
+
+  /* ---------- sections & tables ---------- */
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+            padding: 20px 22px; margin-bottom: 20px; }
+  section h2 { margin: 0 0 4px; font-size: 18px; }
+  section .desc { margin: 0 0 14px; font-size: 13.5px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line);
+           vertical-align: top; }
+  th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px;
+       color: var(--muted); border-bottom: 2px solid var(--line); user-select: none; }
+  .sortable th { cursor: pointer; }
+  .sortable th:hover { color: var(--accent); }
+  .sortable th .dir { font-size: 10px; }
+  tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: #f8fafc; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.sev-critical td:first-child { box-shadow: inset 3px 0 0 var(--critical); }
+  tr.sev-warning  td:first-child { box-shadow: inset 3px 0 0 var(--warning); }
+  .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
+  code { background: var(--info-bg); border-radius: 4px; padding: 1px 5px;
+         font: 12.5px ui-monospace, "Cascadia Code", Consolas, monospace; }
+
+  /* ---------- footer ---------- */
+  footer { margin-top: 32px; font-size: 12.5px; color: var(--muted);
+           border-top: 1px solid var(--line); padding-top: 14px; }
+
+  /* ---------- print ---------- */
+  @media print {
+    body { background: #fff; }
+    .wrap { padding: 0; max-width: none; }
+    section, .kpi { border: 1px solid #ccc; break-inside: avoid; }
+    tbody tr:hover { background: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Environment Health Check</h1>
+    <div class="env">vcsim simulated environment</div>
+    <div class="meta">
+      <span><b>vCenter:</b> 127.0.0.1:8992</span>
+      <span><b>Version:</b> VMware vCenter Server 6.5.0 build-5973321 (govmomi simulator)</span>
+      <span><b>Scope:</b> 1 datacenter · 2 compute resources · 4 hosts · 4 VMs · 1 datastore</span>
+      <span><b>Generated:</b> 2026-07-30 10:11 CEST</span>
+    </div>
+  </header>
+
+  <!-- ============ summary KPIs: one .kpi per headline number ============ -->
+  <div class="kpis">
+        <div class="kpi sev-critical"><div class="n">1</div><div class="l">VMs with a snapshot chain &gt; 3 deep</div></div>
+    <div class="kpi sev-critical"><div class="n">1</div><div class="l">Hosts in maintenance mode</div></div>
+    <div class="kpi sev-warning"><div class="n">4/4</div><div class="l">VMs without running VMware Tools</div></div>
+    <div class="kpi sev-ok"><div class="n">1.0%</div><div class="l">Peak datastore usage</div></div>
+    <div class="kpi sev-ok"><div class="n">0</div><div class="l">Triggered alarms</div></div>
+    <div class="kpi"><div class="n">4</div><div class="l">VMs total</div></div>
+  </div>
+
+  <!-- ============ findings: one row per finding, worst first ============ -->
+  <section id="findings">
+    <h2>Findings</h2>
+    <p class="desc">Ordered by severity. Every finding names the affected objects and a recommended action.</p>
+    <table>
+      <thead><tr><th style="width:110px">Severity</th><th>Finding</th><th>Affected objects</th><th>Recommended action</th></tr></thead>
+      <tbody>
+                <tr class="sev-critical">
+          <td><span class="badge sev-critical">Critical</span></td>
+          <td>Snapshot chain deeper than three levels</td>
+          <td><code>DC0_H0_VM0</code> — 4 snapshots in one chain, oldest 2026-07-30</td>
+          <td>Consolidate the chain. Each level adds a delta file that must be read on every I/O; a long chain slows the VM and makes deletion risky. Snapshots are not backups.</td>
+        </tr>
+        <tr class="sev-critical">
+          <td><span class="badge sev-critical">Critical</span></td>
+          <td>Host in maintenance mode</td>
+          <td><code>DC0_C0_H2</code> — 1 of 3 hosts in <code>domain-c28</code></td>
+          <td>Confirm this is intended. While in maintenance the host runs no workload, so the cluster is operating with reduced failover capacity.</td>
+        </tr>
+        <tr class="sev-warning">
+          <td><span class="badge sev-warning">Warning</span></td>
+          <td>VMware Tools not running</td>
+          <td>4 of 4 VMs, all reporting <code>toolsNotInstalled</code></td>
+          <td>Install VMware Tools. Without it there is no guest quiescing, no clean shutdown and no guest IP or heartbeat reporting.</td>
+        </tr>
+        <tr class="sev-warning">
+          <td><span class="badge sev-warning">Warning</span></td>
+          <td>Host hardware health status unknown</td>
+          <td>4 of 4 hosts report <code>overallStatus: gray</code></td>
+          <td>Health could not be determined, so absence of alarms is not proof of health. On real hardware, check the CIM provider; here it reflects the simulator not populating sensor data.</td>
+        </tr>
+        <tr>
+          <td><span class="badge sev-info">Info</span></td>
+          <td>Powered-off VMs present</td>
+          <td><code>DC0_C0_RP0_VM1</code></td>
+          <td>None if intended. Powered-off VMs still consume datastore capacity and count towards licensing inventory.</td>
+        </tr>
+        <tr>
+          <td><span class="badge sev-ok">OK</span></td>
+          <td>Datastore capacity within thresholds</td>
+          <td><code>LocalDS_0</code> at 1.0% used</td>
+          <td>None. Well below the 75% warning threshold.</td>
+        </tr>
+        <tr>
+          <td><span class="badge sev-ok">OK</span></td>
+          <td>No triggered alarms</td>
+          <td>Checked at the root folder, all descendants</td>
+          <td>None.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ============ data sections: one <section> per table ============ -->
+    <section>
+    <h2>Datastore capacity</h2>
+    <p class="desc">Source: <code>govc datastore.info -json</code>. Thresholds applied: warning &ge; 75% used, critical &ge; 85% used.</p>
+    <table class="sortable">
+      <thead><tr><th>Datastore</th><th>Type</th><th class="num">Capacity</th><th class="num">Free</th><th class="num">Used</th><th class="num">Used %</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>LocalDS_0</td>
+          <td>OTHER</td>
+          <td class="num" data-v="4398046511104">4.00 TiB</td>
+          <td class="num" data-v="4355096838144">3.96 TiB</td>
+          <td class="num" data-v="42949672960">40.0 GiB</td>
+          <td class="num" data-v="1.0">1.0%</td>
+          <td><span class="badge sev-ok">OK</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+  <section>
+    <h2>Hosts</h2>
+    <p class="desc">Source: <code>govc host.info -json</code> per host. A host in maintenance mode or not connected is flagged critical; <code>overallStatus: gray</code> means the host did not report a health verdict.</p>
+    <table class="sortable">
+      <thead><tr><th>Host</th><th>MoRef</th><th>ESXi build</th><th class="num">Cores</th><th class="num">CPU/core</th><th class="num">Memory</th><th>Connection</th><th>Maintenance</th><th>Health</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>DC0_C0_H0</td>
+          <td><code>host-37</code></td>
+          <td>8.0.2 build-21997540</td>
+          <td class="num" data-v="2">2</td>
+          <td class="num" data-v="2294">2294 MHz</td>
+          <td class="num" data-v="4095">4095 MiB</td>
+          <td>connected</td>
+          <td>no</td>
+          <td>gray</td>
+        </tr>
+        <tr>
+          <td>DC0_C0_H1</td>
+          <td><code>host-47</code></td>
+          <td>8.0.2 build-21997540</td>
+          <td class="num" data-v="2">2</td>
+          <td class="num" data-v="2294">2294 MHz</td>
+          <td class="num" data-v="4095">4095 MiB</td>
+          <td>connected</td>
+          <td>no</td>
+          <td>gray</td>
+        </tr>
+        <tr class="sev-critical">
+          <td>DC0_C0_H2</td>
+          <td><code>host-57</code></td>
+          <td>8.0.2 build-21997540</td>
+          <td class="num" data-v="2">2</td>
+          <td class="num" data-v="2294">2294 MHz</td>
+          <td class="num" data-v="4095">4095 MiB</td>
+          <td>connected</td>
+          <td><span class="badge sev-critical">yes</span></td>
+          <td>gray</td>
+        </tr>
+        <tr>
+          <td>DC0_H0</td>
+          <td><code>host-21</code></td>
+          <td>8.0.2 build-21997540</td>
+          <td class="num" data-v="2">2</td>
+          <td class="num" data-v="2294">2294 MHz</td>
+          <td class="num" data-v="4095">4095 MiB</td>
+          <td>connected</td>
+          <td>no</td>
+          <td>gray</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+  <section>
+    <h2>Virtual machines</h2>
+    <p class="desc">Source: <code>govc vm.info -json '&lt;path&gt;'</code>. Snapshot counts recurse into <code>childSnapshotList</code>, so a chain is counted per level, not as one snapshot. Rows with a chain deeper than 3 are flagged critical.</p>
+    <table class="sortable">
+      <thead><tr><th>VM</th><th>Power state</th><th class="num">vCPU</th><th class="num">Memory</th><th>VMware Tools</th><th class="num">Snapshots</th><th>Host MoRef</th><th>Datastore path</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>DC0_C0_RP0_VM0</td>
+          <td>poweredOn</td>
+          <td class="num" data-v="1">1</td>
+          <td class="num" data-v="32">32 MiB</td>
+          <td>toolsNotInstalled</td>
+          <td class="num" data-v="2">2 (chain depth 2)</td>
+          <td><code>host-57</code></td>
+          <td><code>[LocalDS_0] DC0_C0_RP0_VM0/DC0_C0_RP0_VM0.vmx</code></td>
+        </tr>
+        <tr>
+          <td>DC0_C0_RP0_VM1</td>
+          <td>poweredOff</td>
+          <td class="num" data-v="1">1</td>
+          <td class="num" data-v="32">32 MiB</td>
+          <td>toolsNotInstalled</td>
+          <td class="num" data-v="0">0</td>
+          <td><code>host-47</code></td>
+          <td><code>[LocalDS_0] DC0_C0_RP0_VM1/DC0_C0_RP0_VM1.vmx</code></td>
+        </tr>
+        <tr class="sev-critical">
+          <td>DC0_H0_VM0</td>
+          <td>poweredOn</td>
+          <td class="num" data-v="1">1</td>
+          <td class="num" data-v="32">32 MiB</td>
+          <td>toolsNotInstalled</td>
+          <td class="num" data-v="4">4 (chain depth 4)</td>
+          <td><code>host-21</code></td>
+          <td><code>[LocalDS_0] DC0_H0_VM0/DC0_H0_VM0.vmx</code></td>
+        </tr>
+        <tr>
+          <td>DC0_H0_VM1</td>
+          <td>poweredOn</td>
+          <td class="num" data-v="1">1</td>
+          <td class="num" data-v="32">32 MiB</td>
+          <td>toolsNotInstalled</td>
+          <td class="num" data-v="0">0</td>
+          <td><code>host-21</code></td>
+          <td><code>[LocalDS_0] DC0_H0_VM1/DC0_H0_VM1.vmx</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+  <section>
+    <h2>Snapshots</h2>
+    <p class="desc">Source: <code>govc snapshot.tree -vm '&lt;path&gt;' -f -D -i</code>, walked recursively. Thresholds applied: warning &gt; 3 days old, critical &gt; 7 days old or more than 3 levels in one chain. Use the <code>snapshot-NNNNN</code> MoRef with <code>snapshot.remove</code> — the integer <code>id</code> from <code>vm.info</code> is rejected. Snapshot size is not reported by this endpoint and was not collected.</p>
+    <table class="sortable">
+      <thead><tr><th>VM</th><th>Snapshot</th><th>MoRef</th><th class="num">Chain depth</th><th>Created</th><th class="num">Age</th><th>Quiesced</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>DC0_C0_RP0_VM0</td>
+          <td>pre-patch baseline</td>
+          <td><code>snapshot-82</code></td>
+          <td class="num" data-v="1">1</td>
+          <td>2026-07-30 10:08</td>
+          <td class="num" data-v="0">0 days</td>
+          <td>no</td>
+        </tr>
+        <tr>
+          <td>DC0_C0_RP0_VM0</td>
+          <td>before config edit</td>
+          <td><code>snapshot-84</code></td>
+          <td class="num" data-v="2">2</td>
+          <td>2026-07-30 10:08</td>
+          <td class="num" data-v="0">0 days</td>
+          <td>no</td>
+        </tr>
+        <tr>
+          <td>DC0_H0_VM0</td>
+          <td>pre-patch baseline</td>
+          <td><code>snapshot-74</code></td>
+          <td class="num" data-v="1">1</td>
+          <td>2026-07-30 10:08</td>
+          <td class="num" data-v="0">0 days</td>
+          <td>no</td>
+        </tr>
+        <tr>
+          <td>DC0_H0_VM0</td>
+          <td>before app upgrade</td>
+          <td><code>snapshot-76</code></td>
+          <td class="num" data-v="2">2</td>
+          <td>2026-07-30 10:08</td>
+          <td class="num" data-v="0">0 days</td>
+          <td>no</td>
+        </tr>
+        <tr>
+          <td>DC0_H0_VM0</td>
+          <td>before schema change</td>
+          <td><code>snapshot-78</code></td>
+          <td class="num" data-v="3">3</td>
+          <td>2026-07-30 10:08</td>
+          <td class="num" data-v="0">0 days</td>
+          <td>no</td>
+        </tr>
+        <tr class="sev-critical">
+          <td>DC0_H0_VM0</td>
+          <td>quick test</td>
+          <td><code>snapshot-80</code></td>
+          <td class="num" data-v="4">4</td>
+          <td>2026-07-30 10:08</td>
+          <td class="num" data-v="0">0 days</td>
+          <td>no</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+  <section>
+    <h2>Triggered alarms</h2>
+    <p class="desc">Source: <code>govc alarms -json</code> at the root folder, covering all descendants. Thresholds applied: yellow = warning, red = critical.</p>
+    <p class="empty">No triggered alarms.</p>
+  </section>
+
+  <footer>
+    All data collected read-only with govc 0.53.0 against the govmomi vcsim simulator (no production system was contacted) on 2026-07-30. · Generated with the
+    <a href="https://github.com/vchaindz/claude-vsphere-skill">claude-vsphere-skill</a> (read-only data collection via govc).
+    Verify findings before acting on production systems.
+  </footer>
+
+</div>
+
+<script>
+/* click-to-sort for table.sortable — numeric via td.num / data-v, else string */
+document.querySelectorAll("table.sortable").forEach(function (tbl) {
+  tbl.querySelectorAll("thead th").forEach(function (th, i) {
+    th.addEventListener("click", function () {
+      var tb = tbl.tBodies[0], dir = th.dataset.dir === "asc" ? -1 : 1;
+      tbl.querySelectorAll("thead th").forEach(function (h) {
+        delete h.dataset.dir; var d = h.querySelector(".dir"); if (d) d.remove();
+      });
+      th.dataset.dir = dir === 1 ? "asc" : "desc";
+      th.insertAdjacentHTML("beforeend", ' <span class="dir">' + (dir === 1 ? "▲" : "▼") + "</span>");
+      var numeric = th.classList.contains("num");
+      Array.from(tb.rows).sort(function (a, b) {
+        var x = a.cells[i], y = b.cells[i];
+        if (numeric) {
+          var xv = parseFloat(x.dataset.v || x.textContent.replace(/[^\d.-]/g, "")) || 0;
+          var yv = parseFloat(y.dataset.v || y.textContent.replace(/[^\d.-]/g, "")) || 0;
+          return (xv - yv) * dir;
+        }
+        return x.textContent.trim().localeCompare(y.textContent.trim()) * dir;
+      }).forEach(function (r) { tb.appendChild(r); });
+    });
+  });
+});
+</script>
+</body>
+</html>
