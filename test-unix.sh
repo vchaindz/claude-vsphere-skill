@@ -209,6 +209,20 @@ if [ -n "$firstvm" ]; then
     t "info: vm.info -json"        govc vm.info -json "$firstvm"
     t "collect: powerState"        govc collect -s "$firstvm" summary.runtime.powerState
     t "metrics: metric.ls"         govc metric.ls "$firstvm"
+    # --- performance history (govc/references/metrics.md) ---
+    # `-i day` is the past-DAY window at 5-min resolution; daily rollups are
+    # `-i year` / `-i 86400`. vcsim returns synthetic data at every interval,
+    # so these assert the command surface, never a value.
+    t "metrics: interval.info"     govc metric.interval.info
+    t "metrics: metric.info"       govc metric.info "$firstvm" cpu.usage.average
+    t "metrics: daily rollup"      govc metric.sample -i 86400 -n 5 -instance - "$firstvm" cpu.usage.average
+    if command -v jq >/dev/null 2>&1; then
+        # -json identifies entities by MoRef only, and percent counters are hundredths
+        t "metrics: -json entity is a MoRef" bash -c \
+          "govc metric.sample -i 86400 -n 5 -instance - -json '$firstvm' cpu.usage.average | jq -e '.sample[0].entity.value' >/dev/null"
+        t "metrics: -json carries unit"      bash -c \
+          "govc metric.sample -i 86400 -n 5 -instance - -json '$firstvm' cpu.usage.average | jq -e '.sample[0].value[0] | has(\"unit\")' >/dev/null"
+    fi
 fi
 
 # the portable batch pattern the skill teaches - must work on BSD/macOS xargs too

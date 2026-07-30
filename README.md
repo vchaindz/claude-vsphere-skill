@@ -198,11 +198,11 @@ powershell -ExecutionPolicy Bypass -File .\test-windows.ps1
 ```
 
 ```bash
-# Linux/macOS: installs govc + vcsim + the skill, runs 42 smoke tests against the simulator.
+# Linux/macOS: installs govc + vcsim + the skill, runs 46 smoke tests against the simulator.
 # No vCenter and no credentials needed — nothing real is touched.
 ./test-unix.sh --vcsim
 
-# Or against your real vCenter: ~36 READ-ONLY tests
+# Or against your real vCenter: ~40 READ-ONLY tests
 ./test-unix.sh
 # optional snapshot create/remove cycle on an explicitly named non-production VM:
 ./test-unix.sh --write-test my-test-vm
