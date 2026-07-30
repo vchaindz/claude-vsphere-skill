@@ -154,6 +154,12 @@ refuse events -n 5 -f                 # unbounded follow
 refuse collect -s VM-0001 config.annotation
 refuse collect -s VM-0001 config.extraConfig
 refuse notaverb
+# Flags govc does not define for these verbs -- the object is positional. They used
+# to sit in the allowlist, so policy permitted them and govc then rejected them with
+# "flag provided but not defined", which reads like a wrapper bug.
+refuse vm.info -vm VM-0001
+refuse vm.power -off -vm VM-0001
+refuse datastore.info -ds DS-01
 # Snapshot removal must name exactly one snapshot, unambiguously and stably.
 refuse snapshot.remove -vm VM-0001 '*'                       # whole tree in one call
 refuse snapshot.remove -vm VM-0001 "$SNAP_A"                 # by name

@@ -37,11 +37,20 @@ govc cluster.add -cluster ClusterA -hostname esx-new.example.com `
 ## Maintenance mode (patching workflow)
 
 ```bash
-govc host.maintenance.enter -host esx01          # DRS should evacuate VMs first
-govc host.maintenance.exit  -host esx01
+govc host.maintenance.enter esx01                # DRS should evacuate VMs first
+govc host.maintenance.exit  esx01
 ```
 
-Safe sequence for one host: check cluster has capacity (`cluster.usage`), enter maintenance (this blocks until VMs are evacuated — with DRS in fullyAutomated it's automatic; otherwise migrate VMs manually with `vm.migrate`), do the work (or `host.shutdown -host esx01 [-r]` for reboot — confirm first), exit maintenance, verify with `host.info` and `alarms`.
+The host is a **positional** argument here, not `-host`. Verbs whose usage line ends in
+`HOST...` (`host.maintenance.enter`/`.exit`, `host.shutdown`) require at least one
+positional host and fail with a bare `govc: no argument` if you pass only `-host esx01` —
+an error that says nothing about the cause. `-host` is the selector only for verbs that
+take no host positionally (`host.info`, `host.esxcli`, `host.portgroup.*`). Check with
+`govc <verb> -h`: the usage line is authoritative. The same trap exists for
+`vm.info`/`vm.power` (VM is positional; there is no `-vm` flag) and `datastore.info`
+(no `-ds` flag).
+
+Safe sequence for one host: check cluster has capacity (`cluster.usage`), enter maintenance (this blocks until VMs are evacuated — with DRS in fullyAutomated it's automatic; otherwise migrate VMs manually with `vm.migrate`), do the work (or `host.shutdown esx01 [-r]` for reboot — confirm first), exit maintenance, verify with `host.info` and `alarms`.
 
 ## esxcli passthrough
 

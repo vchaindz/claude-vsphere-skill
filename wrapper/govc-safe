@@ -76,9 +76,9 @@ VERB_FLAGS = {
     "find":                   _J | {"-type", "-name", "-maxdepth", "-i", "-l", "-p", "-dc"},
     "tree":                   _J | {"-l", "-L", "-dc"},
     "collect":                _J | {"-s", "-n", "-type", "-dc"},
-    "vm.info":                _J | {"-vm", "-r", "-t", "-g", "-dc"},   # never -e
+    "vm.info":                _J | {"-r", "-t", "-g", "-dc"},          # never -e; VM is positional
     "host.info":              _J | {"-host", "-dc"},
-    "datastore.info":         _J | {"-ds", "-dc"},
+    "datastore.info":         _J | {"-dc"},                            # PATH is positional
     "datacenter.info":        _J | {"-dc"},
     "cluster.usage":          _J | {"-dc"},
     "pool.info":              _J | {"-p", "-dc"},
@@ -89,7 +89,7 @@ VERB_FLAGS = {
     "events":                 _J | {"-n", "-type", "-dc"},             # never -f
     "tasks":                  _J | {"-n", "-dc"},                      # never -f
     "alarms":                 _J | {"-n", "-dc"},
-    "vm.power":               {"-on", "-off", "-s", "-r", "-reset", "-suspend", "-force", "-vm", "-dc"},
+    "vm.power":               {"-on", "-off", "-s", "-r", "-reset", "-suspend", "-force", "-dc"},
     "vm.migrate":             {"-host", "-ds", "-pool", "-folder", "-priority", "-dc"},
     "snapshot.create":        {"-vm", "-d", "-m", "-q", "-dc"},
     "snapshot.remove":        {"-vm", "-c", "-dc"},
@@ -97,6 +97,18 @@ VERB_FLAGS = {
     "host.maintenance.exit":  {"-host", "-timeout", "-dc"},
 }
 ALLOWED_VERBS = set(VERB_FLAGS)
+
+# Flags that read as obvious but that govc does not define for these verbs: the
+# object is a positional argument here, and `-vm`/`-ds` exist only on the verbs
+# that do take them (snapshot.*, vm.migrate, datastore.maintenance.*). Left in
+# the allowlist they were a trap -- permitted by policy, then rejected by govc
+# with "flag provided but not defined", which reads like a wrapper bug. Answer
+# with the working form instead of dumping the allowlist.
+POSITIONAL_OBJECT = {
+    ("vm.info", "-vm"):        "vm.info -json VM-0001",
+    ("vm.power", "-vm"):       "vm.power -off VM-0001",
+    ("datastore.info", "-ds"): "datastore.info -json DS-01",
+}
 
 # `find` filters on arbitrary object properties. Filtering does not print the
 # property, so the leak is only an oracle, but keep it to a curated set.
@@ -704,6 +716,10 @@ def check_policy(args):
             continue
         if verb == "find" and flag in FIND_FILTERS:
             continue
+        if (verb, flag) in POSITIONAL_OBJECT:
+            raise Refused(
+                "govc does not define '%s' for '%s' -- the object goes in as a "
+                "positional argument: %s" % (flag, verb, POSITIONAL_OBJECT[(verb, flag)]))
         raise Refused(
             "flag '%s' is not permitted for '%s'. Allowed here: %s"
             % (flag, verb, " ".join(sorted(allowed))))
