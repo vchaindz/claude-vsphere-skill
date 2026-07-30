@@ -9,9 +9,13 @@
 #   1. copies govc-policy.py to ~/.local/bin (0755)
 #   2. writes ~/.config/govc-guard/policy with the chosen tier (0644) —
 #      only if the file does not already exist (never overwrites a policy)
-#   3. merges a PreToolUse hook entry and a deny rule protecting the policy
-#      file into settings.json (backup taken first; merge is additive and
-#      idempotent — re-running converges)
+#   3. merges a PreToolUse hook entry and deny rules protecting both the
+#      policy file and the hook script itself into settings.json (backup
+#      taken first; merge is additive and idempotent — re-running converges)
+#
+# The deny rules name the two *installed* paths, so a checkout of this repo
+# stays editable and testable; the hook resolves cd/~/relative forms itself,
+# which is what closes the shell-side hole.
 #
 # Coexists with the privacy wrapper: both hooks can be wired; this one
 # decides *whether* a command may run, the wrapper decides *what the model
@@ -79,10 +83,24 @@ try:
 except Exception as e:
     sys.exit(f"refusing to touch malformed settings file: {e}")
 
-# deny rules: agent must not edit or read-modify the policy file
+# Deny rules. The agent must not be able to edit the policy file *or* the
+# hook script — rewriting govc-policy.py turns every check into a no-op, so
+# protecting only the policy value would leave the door next to it open.
+#
+# File-tool patterns are gitignore-style: "//" is an absolute path, while a
+# single leading "/" would be read as relative to the settings file's own
+# directory and silently protect nothing. The Bash patterns are substring
+# globs (same convention as wrapper/settings-merge.py), scoped to the two
+# installed paths — the hook resolves `cd`, `~` and relative forms itself,
+# so these do not need to match by name and a checkout of this repo stays
+# editable.
 perms = s.setdefault("permissions", {})
 deny = perms.setdefault("deny", [])
-for rule in (f"Edit({policy})", f"Write({policy})", f"Bash(* {policy}*)"):
+rules = []
+for target in (policy, hook_cmd):
+    target = os.path.abspath(target)
+    rules += [f"Edit(/{target})", f"Write(/{target})", f"Bash(*{target}*)"]
+for rule in rules:
     if rule not in deny:
         deny.append(rule)
 

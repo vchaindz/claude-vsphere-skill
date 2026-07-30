@@ -22,8 +22,9 @@ govc is the vSphere CLI built on govmomi (https://github.com/vmware/govmomi). It
    carry over to the next. So if the vars are missing, do not try to export them yourself
    and do not ask the user to paste a password into the chat. Tell the user to set them in
    their shell and restart Claude Code (`references/setup.md` has the syntax for bash/zsh,
-   PowerShell, and cmd). Check what's visible with `govc env GOVC_URL` — note that a bare
-   `govc env` prints `GOVC_PASSWORD` in cleartext, so never run it.
+   PowerShell, and cmd). Check what's visible with `govc env GOVC_URL` — always name the
+   variable you want, because `govc env` without one prints `GOVC_PASSWORD` in cleartext,
+   and so do `govc env -json`, `-dump` and `-x`. Never run those.
 
 2. **Know which shell you're in.** The command syntax below differs between POSIX shells
    and native PowerShell:

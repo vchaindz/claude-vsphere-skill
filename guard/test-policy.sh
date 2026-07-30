@@ -59,7 +59,58 @@ echo "tier = full"     > "$TMP/full"
 [ "$(run "$TMP/std"  'govc vm.destroy x')"     = deny  ] && pass "standard denies destroy"   || fail "standard/destroy"
 [ "$(run "$TMP/full" 'govc vm.destroy x')"     = ask   ] && pass "full asks on destroy"      || fail "full/destroy should ask"
 [ "$(run "$TMP/full" 'govc env')"              = deny  ] && pass "bare govc env denied everywhere" || fail "govc env leak"
+[ "$(run "$TMP/full" 'govc env -json')"        = deny  ] && pass "govc env -json denied too"   || fail "govc env -json leak"
+[ "$(run "$TMP/ro"   'govc env GOVC_URL')"     = allow ] && pass "govc env NAME still allowed" || fail "govc env NAME"
 [ "$(run "$TMP/std"  'ls -la && cat /etc/os-release')" = allow ] && pass "non-govc untouched" || fail "non-govc command touched"
+
+# indirection: subcommand not literally present after `govc`
+[ "$(run "$TMP/std"  'printf "vm.destroy\n" | xargs govc')" = deny ] \
+  && pass "xargs-from-stdin denied" || fail "xargs-from-stdin fails open"
+[ "$(run "$TMP/full" 'B=/usr/local/bin/govc; $B vm.destroy x')" = ask ] \
+  && pass "\$VAR indirection asks at full" || fail "\$VAR indirection fails open"
+[ "$(run "$TMP/std"  'govc vm.power -off=true x')" = deny ] \
+  && pass "-off=true denied" || fail "-off=true fails open"
+[ "$(run "$TMP/std"  'govc vm.power -s x')" = deny ] \
+  && pass "guest shutdown is destroy-class" || fail "vm.power -s"
+
+# scripts are read through: a govc call the model wrote with the Write tool
+# is never in the Bash command, but the file is right there on disk
+printf '#!/bin/sh\ngovc vm.destroy VM-1\n' > "$TMP/destroy.sh"
+printf '#!/bin/sh\ngovc vm.info VM-1\n'    > "$TMP/read.sh"
+printf '#!/bin/sh\nsh %s/destroy.sh\n' "$TMP" > "$TMP/outer.sh"
+printf 'notes: run govc vm.destroy VM-1 by hand\n' > "$TMP/notes.md"
+chmod +x "$TMP"/*.sh
+
+[ "$(run "$TMP/std" "sh $TMP/destroy.sh")" = deny ] \
+  && pass "script contents are classified" || fail "script bypass still open"
+[ "$(run "$TMP/full" "$TMP/destroy.sh")" = ask ] \
+  && pass "directly executed script asks at full" || fail "direct script exec"
+[ "$(run "$TMP/std" "sh $TMP/outer.sh")" = deny ] \
+  && pass "nested script followed" || fail "nested script not followed"
+[ "$(run "$TMP/std" "sh $TMP/read.sh")" = allow ] \
+  && pass "read-only script allowed" || fail "read-only script denied"
+[ "$(run "$TMP/std" "cat $TMP/notes.md")" = allow ] \
+  && pass "files that are only read are not judged" || fail "cat was judged"
+[ "$(run "$TMP/std" "sh $TMP/missing.sh")" = allow ] \
+  && pass "missing script is not an error" || fail "missing script"
+
+# a checkout of this repo stays editable — only the installed paths are the
+# guard's own files
+[ "$(run "$TMP/std" 'python3 guard/govc-policy.py --selftest')" = allow ] \
+  && pass "repo copy is not the installed hook" || fail "repo copy blocked"
+[ "$(run "$TMP/std" 'git checkout guard/govc-policy.py')" = allow ] \
+  && pass "repo copy is revertable" || fail "git checkout blocked"
+
+# the guard protects its own files at every tier
+[ "$(run "$TMP/full" "echo 'tier = full' > $TMP/full")" = deny ] \
+  && pass "policy file is write-protected" || fail "policy file writable"
+[ "$(run "$TMP/full" "cd $TMP && echo 'allow = vm.destroy' >> full")" = deny ] \
+  && pass "cd + relative path still resolves" || fail "cd-relative write allowed"
+[ "$(run "$TMP/full" "cat > $HOOK <<EOF
+pass
+EOF")" = deny ] && pass "hook script is write-protected" || fail "hook script writable"
+[ "$(run "$TMP/full" "cat $TMP/full")" = allow ] \
+  && pass "reading the policy is fine" || fail "policy unreadable"
 
 # extras
 printf 'tier = standard\ndeny = vm.migrate\n' > "$TMP/extra"
