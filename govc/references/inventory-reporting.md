@@ -42,6 +42,51 @@ govc collect -s vm/my-vm guest.ipAddress
 govc collect -s host/cluster1/esx01 summary.quickStats.overallCpuUsage
 ```
 
+### Batch property reads with `collect -type`
+
+`govc collect -type <alias> <root> <prop>...` reads properties from every object of a type
+under a root in **one** call — faster than `find` + `xargs`, and the right tool whenever you
+want fields rather than whole objects. The root can be `/`, a datacenter, a cluster, or a
+single host (a host root yields that host's VMs).
+
+```bash
+govc collect -s -type h /DC1/host/ClusterA name        # the cluster's hosts
+govc collect -s -type m /DC1/host/ClusterA/esx03 name  # the VMs registered on one host
+```
+
+Two traps, both easy to hit and hard to diagnose:
+
+**Flags go before the root.** `govc collect -type h /DC1/host/ClusterA -s name` does not
+error — the trailing `-s name` is parsed as a property *filter* and the command blocks
+forever waiting for `-s` to become `name`. If a `collect` call hangs, this is why.
+
+**There are two different JSON shapes.** `collect -json <path> <props>` returns a JSON array
+of `{name, op, val}`. `collect -json -type X <root> <props>` returns a newline-delimited
+*stream* of `{kind, obj, changeSet:[…]}`, so jq needs `-s`. Array-valued properties arrive
+wrapped as `{"_value":[…]}` while scalars are bare, so the flattener needs a type guard:
+
+```bash
+govc collect -json -type h / name summary.hardware.numCpuCores summary.hardware.memorySize |
+  jq -s -r 'def v: if type=="object" and has("_value") then ._value else . end;
+    .[] | ([.changeSet[] | {(.name): (.val|v)}] | add) as $p |
+    [$p.name, $p["summary.hardware.numCpuCores"],
+     ($p["summary.hardware.memorySize"]/1073741824|floor)] | @tsv'
+```
+```powershell
+# no jq: parse each line, then flatten changeSet into a hashtable
+govc collect -json -type h / name summary.hardware.numCpuCores |
+  ForEach-Object { $_ | ConvertFrom-Json } | ForEach-Object {
+    $p = @{}; $_.changeSet | ForEach-Object {
+      $p[$_.name] = if ($_.val.PSObject.Properties.Name -contains '_value') { $_.val._value } else { $_.val } }
+    [pscustomobject]$p }
+```
+
+Reuse that `def v:` line verbatim — it is the difference between a recipe that works and one
+that breaks the first time someone adds an array-valued property.
+
+Object identity in this output is the MoRef (`.obj.value`), not the name, unless you ask for
+`name` explicitly. Always ask for `name`.
+
 ## Fleet-wide reports
 
 Pattern: `find` to enumerate → `-json` to extract → `jq` to shape. Examples:

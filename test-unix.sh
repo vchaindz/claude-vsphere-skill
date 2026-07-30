@@ -174,9 +174,32 @@ if command -v jq >/dev/null 2>&1; then
       "govc events -n 50 -l -json | jq -s -r '[.[] | select(.category == \"error\")] | length' >/dev/null"
 fi
 
+# --- patch-day pre-flight (govc/references/patching.md) ------------------------
+# All read-class: the go/no-go assessment works at tier readonly.
+if [ -n "$firstcluster" ]; then
+    t "patch: DRS enabled + mode"    bash -c \
+      "govc collect -json '$firstcluster' configurationEx | jq -e '.[0].val | has(\"drsConfig\")' >/dev/null"
+    t "patch: cluster summary"       govc collect -json "$firstcluster" summary
+    t "patch: per-VM DRS overrides"  govc cluster.override.info -json "$firstcluster"
+    # host capacity: cores x cpuMhz must sum to what cluster.usage reports
+    t "patch: host capacity batch"   bash -c \
+      "govc collect -json -type h '$firstcluster' name summary.hardware.numCpuCores summary.hardware.cpuMhz summary.hardware.memorySize >/dev/null"
+    t "patch: cluster.usage"         govc cluster.usage "$firstcluster"
+fi
+# NOTE: the per-host patch checks live further down, after $firsthost is assigned.
+# Referencing it here aborts the whole run under `set -u`.
+
 # per-host info (host.info needs an explicit host when there are several)
 firsthost=$(govc find / -type h | head -1)
 [ -n "$firsthost" ] && t "info: host.info first host" govc host.info -json -host "$firsthost"
+
+if [ -n "$firsthost" ]; then
+    # build level is READ-class, unlike host.esxcli - this is what makes patch
+    # verification work at tier readonly and in an unattended run
+    t "patch: host build (read-class)" govc collect -s "$firsthost" summary.config.product.build
+    t "patch: host bootTime"           govc collect -s "$firsthost" runtime.bootTime
+    t "patch: VMs on this host"        govc collect -s -type m "$firsthost" name
+fi
 
 # per-VM info + metrics on the first VM found
 firstvm=$(govc find / -type m | head -1)
@@ -228,6 +251,16 @@ if [ -n "$WRITE_VM" ]; then
     else
         echo "[FAIL] VM '$WRITE_VM' not found"; fail=$((fail+1))
     fi
+fi
+
+# maintenance-mode round-trip - SIMULATED HOST ONLY, never a real one. The host
+# is positional here, not -host: `govc host.maintenance.enter -host esx01` fails
+# with a bare "govc: no argument" that says nothing about the cause.
+if [ "$USE_VCSIM" -eq 1 ] && [ -n "$firsthost" ]; then
+    echo; echo "--- maintenance-mode round-trip on simulated host '$firsthost' ---"
+    t "patch: enter maintenance"  govc host.maintenance.enter -timeout 60 "$firsthost"
+    t "patch: inMaintenanceMode"  govc collect -s "$firsthost" runtime.inMaintenanceMode
+    t "patch: exit maintenance"   govc host.maintenance.exit -timeout 60 "$firsthost"
 fi
 
 echo; echo "=== $pass passed, $fail failed ==="

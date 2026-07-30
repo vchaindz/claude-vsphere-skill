@@ -60,6 +60,23 @@ deterministic policy hook installed. Do not rephrase or obfuscate the command to
 around it — report what you wanted to run and why, and let the user decide whether to
 change the tier in their policy file.
 
+The hook classifies every govc call as **read**, **mutate** or **destroy** and compares it
+to the operator's tier. Unknown subcommands are never read-class, so a govc verb the hook
+has not been taught is treated as a mutation:
+
+| Tier | read | mutate | destroy |
+|---|---|---|---|
+| `readonly` | runs | denied | denied |
+| `standard` | runs | runs | **denied outright** — not a prompt |
+| `full` | runs | runs | asks for confirmation |
+
+Two consequences are worth knowing *before* you plan a multi-step operation rather than at
+step four: `host.esxcli` is mutate-class even though the verb you pass it may only read
+(the hook cannot see inside the esxcli argument), and `host.shutdown` / `host.reboot` are
+destroy-class, so at `standard` they are refused outright and the *admin* has to reboot the
+host by another route. Runbook reference files declare their own requirements in a
+`## Guard tiers` section — read it first.
+
 ## Unattended runs
 
 If the prompt says "unattended", "no questions", "use defaults", "scheduled", or names a
@@ -150,6 +167,7 @@ Read the reference file matching the task — each contains commands, tested pat
 | VM create/clone/power/migrate/destroy, guest ops, templates, OVA import | `references/vm-lifecycle.md` |
 | Snapshots: create, revert, remove, tree, audit | `references/snapshots.md` |
 | Hosts and clusters: maintenance, DRS/HA, rules, resource pools, esxcli | `references/host-cluster.md` |
+| Host patch day: pre-flight, evacuate, verify, roll back | `references/patching.md` |
 | Datastores, disks, networking (vSwitch/DVS/portgroups) | `references/storage-network.md` |
 | Environment health check: the fixed nine-check list, severities, baseline diff | `references/health-check.md` |
 | HTML report deliverables: template, severity rules, structure | `references/report-template.md` |
