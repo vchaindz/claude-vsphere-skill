@@ -269,11 +269,37 @@ FILE_CONSUMERS = {
     "cat", "cp", "mv", "ln", "ls", "install", "chmod", "chown", "chgrp",
     "stat", "file", "realpath", "readlink", "dirname", "basename",
     "head", "tail", "less", "more", "wc", "nl", "xxd", "strings",
-    "grep", "egrep", "fgrep", "rg", "cut", "sort", "uniq", "tee",
+    "grep", "egrep", "fgrep", "cut", "uniq", "tee",
     "diff", "cmp", "touch", "mkdir", "rmdir", "rm",
-    "echo", "printf", "git", "shellcheck", "shfmt",
+    "echo", "printf", "shellcheck", "shfmt",
     "md5sum", "sha1sum", "sha256sum", "cksum",
 }
+
+# Commands that take paths like the set above but ALSO have a flag whose value
+# is run as a command. An audit of every member of FILE_CONSUMERS turned up
+# exactly three, and all three were holes:
+#
+#   sort --compress-program=CMD
+#   rg   --pre CMD
+#   git  -c core.pager=CMD / -c alias.x='!CMD' / -c core.sshCommand=CMD /
+#        --exec-path=CMD
+#
+# Dropping them outright would close it, but this repo's own files are named
+# govc-safe and get added, diffed and checked out constantly, so they keep a
+# narrower suppression: the match must be a PLAIN OPERAND. It has to be a bare
+# path token — no `=`, no whitespace, no quotes, so it cannot be `flag=command`
+# or a quoted command line — and the token before it must not be a flag, so it
+# cannot be a flag's value. `git -c core.pager='govc vm.destroy' log` fails the
+# first test and `rg --pre govc pat` the second.
+#
+# Cost, accepted and small: a path preceded by a flag classifies, so
+# `git add -f wrapper/govc-safe` and `sort -u wrapper/govc-safe` are refused
+# where the unflagged forms are not.
+PATH_CONSUMERS = {"git", "sort", "rg"}
+
+# Commands that execute their STANDARD INPUT as shell. `echo 'govc vm.destroy'
+# | at now` schedules it, and `echo` alone would otherwise suppress the match.
+STDIN_EXECUTORS = SHELL_RUNNERS | {"at", "batch", "crontab"}
 
 # How far back command_word looks for the start of a simple command. A bound is
 # needed because this text includes heredocs and whole script bodies, and an
@@ -316,9 +342,53 @@ def reads_stdin_shell(cmd):
     only see as an operand: `echo 'govc vm.destroy' | sh`. Suppression is
     switched off entirely for such a command rather than reasoned about."""
     for toks in segments(cmd):
-        if os.path.basename(toks[0]).lower() in SHELL_RUNNERS:
+        if os.path.basename(toks[0]).lower() in STDIN_EXECUTORS:
             return True
     return False
+
+
+def token_spans(text, floor, pos):
+    """(start, end) of each shell token from `floor` up to the one holding
+    `pos`, quotes respected. The last span is that token."""
+    spans, start, quote, i = [], None, None, floor
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+            if start is None:
+                start = i
+        elif ch in " \t\n":
+            if start is not None:
+                spans.append((start, i))
+                if start <= pos < i:
+                    return spans
+                start = None
+        elif start is None:
+            start = i
+        i += 1
+    if start is not None:
+        spans.append((start, len(text)))
+    return spans
+
+
+def plain_operand(text, m, floor):
+    """True if the match is a bare path argument rather than a command hidden
+    in a flag's value. See PATH_CONSUMERS for why this exists."""
+    spans = token_spans(text, floor, m.start())
+    if not spans:
+        return False
+    ts, te = spans[-1]
+    if not ts <= m.start() < te:
+        return False
+    tok = text[ts:te]
+    if "=" in tok or any(c in tok for c in " \t\n'\""):
+        return False                     # flag=command, or a quoted command line
+    if len(spans) > 1 and text[spans[-2][0]] == "-":
+        return False                     # the value of a flag
+    return True
 
 
 def flag_names(args):
@@ -523,8 +593,13 @@ def extract_invocations(cmd):
     """
     suppress = not reads_stdin_shell(cmd)
     for m in CALL_RE.finditer(cmd):
-        if suppress and command_word(cmd, m.start()) in FILE_CONSUMERS:
-            continue
+        if suppress:
+            word = command_word(cmd, m.start())
+            if word in FILE_CONSUMERS:
+                continue
+            if word in PATH_CONSUMERS and plain_operand(
+                    cmd, m, max(0, m.start() - MAX_LOOKBACK)):
+                continue
         tail = cmd[m.end():]
         # cut at the next shell separator so one invocation's args don't
         # bleed into the next
@@ -946,6 +1021,52 @@ def selftest():
                                                      "standard", "deny"),
         ("rsync -e 'govc vm.destroy' a b",           "standard", "deny"),
         ("ssh h 'govc vm.destroy x'",                "standard", "deny"),
+
+        # --- a command hidden in a flag's value ---------------------------
+        # An audit of every FILE_CONSUMERS member for "has a flag whose value
+        # is executed" found exactly three, and all three were holes. They are
+        # in PATH_CONSUMERS now, where only a bare path operand suppresses.
+        ("sort --compress-program='govc vm.destroy' f",   "standard", "deny"),
+        ("rg --pre 'govc vm.destroy' pat .",              "standard", "deny"),
+        ("git -c core.pager='govc vm.destroy' log",       "standard", "deny"),
+        ("git -c 'alias.z=!govc vm.destroy' z",           "standard", "deny"),
+        ("git -c core.sshCommand='govc vm.destroy' fetch", "standard", "deny"),
+        ("git --exec-path='govc vm.destroy' status",      "standard", "deny"),
+        # the same shape on commands that were never suppressed — these passed
+        # before the audit and must keep passing
+        ("ssh -o ProxyCommand='govc vm.destroy' h",       "standard", "deny"),
+        ("parallel 'govc vm.destroy' ::: a",              "standard", "deny"),
+        ("flock /tmp/l govc vm.destroy x",                "standard", "deny"),
+        ("docker run img govc vm.destroy x",              "standard", "deny"),
+        ("kubectl exec p -- govc vm.destroy x",           "standard", "deny"),
+        # an env assignment whose value is executed by the command it prefixes.
+        # These classify because the assignment token is skipped when looking
+        # for the command word, so the scan runs out of tokens and treats the
+        # match as command position — the safe direction, arrived at honestly.
+        ("LESSOPEN='|govc vm.destroy %s' less f",         "standard", "deny"),
+        ("LESSOPEN='govc vm.destroy' less f",             "standard", "deny"),
+        ("GIT_SSH_COMMAND='govc vm.destroy' git fetch",   "standard", "deny"),
+        ("PAGER='govc vm.destroy' git log",               "standard", "deny"),
+        # `at` runs its standard input as shell, so `echo` must not suppress
+        ("echo 'govc vm.destroy x' | at now",             "standard", "deny"),
+        ("echo 'govc vm.destroy x' | batch",              "standard", "deny"),
+        # ...and the plain path forms stay usable, which is why these three
+        # commands keep a suppression at all
+        ("git add wrapper/govc-safe",                     "readonly", None),
+        ("git diff wrapper/govc-safe",                    "readonly", None),
+        ("git show HEAD:wrapper/govc-safe",               "readonly", None),
+        ("git checkout wrapper/govc-safe",                "readonly", None),
+        ("sort wrapper/govc-safe",                        "readonly", None),
+        ("rg -n TOKEN_RE wrapper/govc-safe",              "readonly", None),
+        # the accepted cost, asserted so it is a decision and not a surprise:
+        # a path behind a flag cannot be told from a flag's value
+        ("git add -f wrapper/govc-safe",                  "readonly", "deny"),
+
+        # shell quote-concatenation in the subcommand. shlex joins the parts,
+        # so these resolve to vm.destroy rather than to an unknown verb.
+        ("govc vm.des''troy my-vm",                       "standard", "deny"),
+        ("govc 'vm.des'troy my-vm",                       "standard", "deny"),
+        ('govc vm.des""troy my-vm',                       "standard", "deny"),
     ]
     failed = 0
     for cmd, tier, expected in cases:
