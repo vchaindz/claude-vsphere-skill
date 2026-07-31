@@ -83,6 +83,22 @@ Test-Cmd 'snapshot: remove'                       { govc snapshot.remove -vm DC0
 Test-Cmd 'events: last 10'                        { govc events -n 10 }
 Test-Cmd 'metrics: metric.ls'                     { govc metric.ls /DC0/vm/DC0_H0_VM0 }
 
+# --- health-check checklist (govc/references/health-check.md) ---
+Test-Cmd 'health: hosts batch (collect -type)'    { govc collect -json -type h / name runtime.connectionState }
+# collect flags must come BEFORE the root, or the call blocks forever
+Test-Cmd 'health: collect flag order'             { govc collect -s -type h / name }
+# alarms -json is a bare array and is empty under vcsim - parse, do not assert content
+Test-Cmd 'health: alarms -json shape'             { govc alarms -json | ConvertFrom-Json }
+# no govc cluster.info exists - HA/DRS state comes from these properties
+# configurationEx must be read WHOLE - the nested path works on vcsim but fails on real vCenter
+Test-Cmd 'health: cluster configurationEx'        { $c = govc find / -type c | Select-Object -First 1; (govc collect -json "$c" configurationEx | ConvertFrom-Json)[0].val.dasConfig.enabled }
+# find has no negation - three calls, and the dotted flag must stay quoted
+Test-Cmd 'health: orphaned VMs'                   { govc find / -type m '-runtime.connectionState' orphaned }
+Test-Cmd 'health: inaccessible VMs'               { govc find / -type m '-runtime.connectionState' inaccessible }
+Test-Cmd 'health: invalid VMs'                    { govc find / -type m '-runtime.connectionState' invalid }
+Test-Cmd 'health: consolidation needed'           { govc find / -type m '-runtime.consolidationNeeded' true }
+Test-Cmd 'health: Tools on powered-on VMs'        { $vms = govc find / -type m '-runtime.powerState' poweredOn; (govc vm.info -json @vms | ConvertFrom-Json).virtualMachines }
+
 if ($fail -eq 0) { $color = 'Green' } else { $color = 'Yellow' }
 Write-Host ""
 Write-Host "=== $pass passed, $fail failed ===" -ForegroundColor $color

@@ -23,6 +23,10 @@ creds
 *-report.*
 rehydrated-*
 
+# Health-check baselines. Small, but the finding keys are inventory paths — the
+# same class of data as the reports above, so the same rule applies.
+*.baseline.json
+
 # Credentials and local environment — never commit these
 .env
 .env.*

@@ -138,6 +138,42 @@ t "events: last 10"                govc events -n 10
 t "tasks: recent"                  govc tasks
 t "alarms: triggered"              govc alarms
 
+# --- health-check checklist (govc/references/health-check.md) -------------------
+# 1: connection state, maintenance mode, uptime and build in one batched read.
+# uptime is 0 under vcsim, so the assertion is that the fields are reachable.
+t "health: hosts batch (collect -type)" bash -c \
+  "govc collect -json -type h / name runtime.connectionState runtime.inMaintenanceMode summary.quickStats.uptime >/dev/null"
+# flags must precede the root - this form hangs forever if they follow it
+t "health: collect flag order"     bash -c \
+  "govc collect -s -type h / name >/dev/null"
+# 2: alarms -json is a BARE ARRAY and emits nothing when nothing is triggered -
+# which is always, under vcsim. Assert the jq root parses, never with -e.
+if command -v jq >/dev/null 2>&1; then
+    t "health: alarms -json shape"  bash -c \
+      "govc alarms -json | jq -r '.[]? | .overallStatus' >/dev/null"
+fi
+# 6: cluster HA/DRS. There is no 'govc cluster.info' - these properties are the
+# answer. An unset boolean prints an empty line, so exit 0 is all we assert.
+firstcluster=$(govc find / -type c | head -1)
+if [ -n "$firstcluster" ]; then
+    # configurationEx must be read WHOLE - the nested path (configurationEx.dasConfig.
+    # enabled) is accepted by vcsim but fails on real vCenter: InvalidProperty
+    t "health: cluster configurationEx" bash -c \
+      "govc collect -json '$firstcluster' configurationEx | jq -e '.[0].val | has(\"dasConfig\")' >/dev/null"
+fi
+# 7: find has no negation, so three calls. All three are empty under vcsim; the
+# point is that the property filter is spelled correctly and exits 0.
+t "health: orphaned VMs"           govc find / -type m -runtime.connectionState orphaned
+t "health: inaccessible VMs"       govc find / -type m -runtime.connectionState inaccessible
+t "health: invalid VMs"            govc find / -type m -runtime.connectionState invalid
+t "health: consolidation needed"   govc find / -type m -runtime.consolidationNeeded true
+# 8: events -json is a stream of objects, not an array (jq -s), and vSphere
+# timestamps carry fractional seconds that fromdateiso8601 rejects.
+if command -v jq >/dev/null 2>&1; then
+    t "health: events error filter" bash -c \
+      "govc events -n 50 -l -json | jq -s -r '[.[] | select(.category == \"error\")] | length' >/dev/null"
+fi
+
 # per-host info (host.info needs an explicit host when there are several)
 firsthost=$(govc find / -type h | head -1)
 [ -n "$firsthost" ] && t "info: host.info first host" govc host.info -json -host "$firsthost"

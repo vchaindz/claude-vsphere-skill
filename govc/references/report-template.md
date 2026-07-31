@@ -78,6 +78,14 @@ in the section `.desc`:
 | VMware Tools | not running | — |
 | Triggered alarms | yellow | red |
 | CPU/mem overcommit context | note in `.desc` | — |
+| Host uptime | below a day when the previous run showed longer (unplanned reboot) | — |
+| VM connection state `orphaned` / `inaccessible` / `invalid` | — | always |
+| Datastore inaccessible | — | always |
+| Disk consolidation needed | always | — |
+| Cluster HA disabled on a cluster with more than one host | always | — |
+| HA admission control disabled while HA is on | always | — |
+| Cluster DRS disabled, or `defaultVmBehavior` `manual`, on a cluster with more than one host | note in `.desc` | — |
+| Error-category events in the window | > 20, or ≥ 3 naming the same object | corroborating a critical from another check |
 
 ## Consultant mode
 
