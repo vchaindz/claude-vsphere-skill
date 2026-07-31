@@ -147,7 +147,11 @@ run snapshot.tree -vm VM-0001 -f -s -D -i
 # File listings, refused outright until the bare-filename gap was closed. This
 # is what the orphaned-VMDK scan needs, and its output is scanned for leaks
 # along with everything else below.
+# The PLAIN form is the one that leaked in v1.2.0: bare directory entries with
+# no [DS-01] prefix and no dir/, so no path pattern matched. -json is forced
+# for this verb now, and this case is here to prove it stays forced.
 run datastore.ls -ds DS-01
+run datastore.ls -ds DS-01 -R
 run datastore.ls -ds DS-01 -R -l -json
 # `tasks` is the only verb with a real time window, and -b/-e were refused by a
 # global rule that read -e as vm.info's extraConfig flag.
@@ -186,6 +190,7 @@ refuse host.storage.info -rescan -host HOST-01   # acts rather than reads
 refuse vm.info -e VM-0001               # extraConfig, per-verb reason now
 refuse fields.ls                        # still out: definition names unhandled
 refuse datastore.download -ds DS-01 x y
+refuse disk.ls -ds DS-01   # FCD names are operator text, no rule yet
 # Flags govc does not define for these verbs -- the object is positional. They used
 # to sit in the allowlist, so policy permitted them and govc then rejected them with
 # "flag provided but not defined", which reads like a wrapper bug.

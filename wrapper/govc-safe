@@ -94,7 +94,6 @@ VERB_FLAGS = {
     # references/rightsizing.md works here: it needs sizes and the set
     # difference, never the names.
     "datastore.ls":           _J | {"-dc", "-ds", "-R", "-l", "-p", "-a", "-H"},
-    "disk.ls":                _J | {"-dc", "-ds", "-l", "-L", "-a", "-T", "-c", "-t"},
     "datacenter.info":        _J | {"-dc"},
     "cluster.usage":          _J | {"-dc"},
     "pool.info":              _J | {"-p", "-dc"},
@@ -183,7 +182,6 @@ FLAG_TAKES_VALUE = {
     "events":                 {"-n", "-type", "-dc"},
     "tasks":                  {"-n", "-dc", "-b", "-e", "-s"},
     "datastore.ls":           {"-dc", "-ds"},
-    "disk.ls":                {"-dc", "-ds", "-c", "-t"},
     "device.ls":              {"-vm", "-dc"},
     "device.info":            {"-vm", "-dc"},
     "vm.ip":                  {"-dc", "-n", "-wait"},
@@ -284,6 +282,14 @@ REFUSED_VERBS = {
     "fields.ls": "field definition names need handling this wrapper does not "
                  "have yet: product names tokenise as FQDNs, admin-chosen ones "
                  "would pass through",
+    # First-class disks carry an operator- or CNS-chosen display name
+    # (`pvc-...`, or whatever someone typed) with no sibling marking it as such,
+    # so it would pass through the way alarm labels used to. The estate this was
+    # developed against has zero FCDs, so there was nothing to verify a rule
+    # against -- and shipping an unverified redaction path is how the plain
+    # datastore.ls output leaked in v1.2.0. Out until it can be tested.
+    "disk.ls": "first-class disk names are operator-chosen free text and this "
+               "wrapper has no rule for them yet",
     "env": "prints GOVC_PASSWORD in cleartext",
     "about.cert": "certificate subject/SAN reveal the real vCenter FQDN",
     "import.spec": "OVF properties include password-typed fields",
@@ -1083,7 +1089,17 @@ def cmd_run(argv):
     learn_inventory(env, tmap)
 
     args = resolve_tokens(argv, tmap)
-    if verb in ("events", "tasks") and "-json" not in args:
+    # Verbs whose PLAIN output has no structure to redact against, so the
+    # JSON form is forced. For events and tasks it is the free-text message.
+    #
+    # `datastore.ls` joined them after shipping a leak: plain output is bare
+    # directory entries, one per line -- no `[DS-01] ` prefix and no `dir/` --
+    # so neither DS_PATH_RE nor VM_FILE_RE matches, and the redaction added for
+    # the JSON listing shape never ran. The names that escaped were folders of
+    # VMs that had been RENAMED, which is the exact case this tool exists for:
+    # the folder keeps the old name, and the old name is not in the inventory
+    # alternation because that only holds current ones.
+    if verb in ("events", "tasks", "datastore.ls") and "-json" not in args:
         args.append("-json")
 
     rc, out, err = run_govc(args, env)
