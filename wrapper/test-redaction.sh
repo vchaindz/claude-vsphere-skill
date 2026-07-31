@@ -312,6 +312,31 @@ check(got["rule"][0]["name"] == "[redacted: free text]",
 check(got["group"][0]["name"] == "[redacted: free text]",
       "an operator-written DRS group name survived: %r" % got["group"][0]["name"])
 
+# Alarm identifiers are vSphere constants and are dotted, so the FQDN sweep ate
+# them: a triggered built-in alarm came back named FQDN-2657 rather than
+# alarm.HostMemoryUsageAlarm. Same fault as the property names above, in a shape
+# the sibling test cannot see -- these are their own keys, not a "name" slot.
+alarm_doc = [{"overallStatus": "red", "acknowledged": False,
+              "name": {"name": "Host memory usage",
+                       "systemName": "alarm.HostMemoryUsageAlarm",
+                       "description": "operator notes here",
+                       "expression": {"expression": [
+                           {"eventTypeId": "vim.event.HealthStatusChangedEvent",
+                            "status": "red"}]}},
+              "entity": {"type": "HostSystem", "value": "host-30"}}]
+got = json.loads(gs.redact_output(json.dumps(alarm_doc), tmap))[0]
+check(got["name"]["systemName"] == "alarm.HostMemoryUsageAlarm",
+      "a built-in alarm's systemName was tokenised: %r" % got["name"]["systemName"])
+check(got["name"]["expression"]["expression"][0]["eventTypeId"]
+      == "vim.event.HealthStatusChangedEvent",
+      "an eventTypeId was tokenised: %r"
+      % got["name"]["expression"]["expression"][0]["eventTypeId"])
+# The exemption is for those two keys only. Prose beside them still goes.
+check(got["name"]["description"] == "[redacted: free text]",
+      "an alarm description survived: %r" % got["name"]["description"])
+check(gs.TOKEN_RE.fullmatch(got["entity"]["value"] or ""),
+      "an alarm's entity MoRef was not tokenised: %r" % got["entity"]["value"])
+
 for m in bad:
     print("[DMG]  %s" % m)
 print("[ok]   engine: keys intact, values tokenised, MoRefs preserved"

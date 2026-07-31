@@ -80,6 +80,7 @@ protecting it.
 ```bash
 govc alarms -json |
   jq -r '.[]? | [(.overallStatus // "-"), (.path // .entity.value // "-"),
+                 (.name.name // .name.systemName // "-"),
                  (.name.systemName // .name.name // "-"),
                  (.acknowledged | tostring)] | @tsv'
 ```
@@ -87,11 +88,30 @@ govc alarms -json |
 **The shape is not what the field names suggest.** `.entity` and `.alarm` are both bare
 MoRefs (`{"type":"Folder","value":"group-d1"}`) — neither carries a name. The alarm's
 definition sits at the **top level** as `.name`, an AlarmInfo object with `.name`,
-`.systemName` and `.description`. So the readable alarm name is `.name.systemName`, not
-`.alarm.info.name`, and `.entity.name` does not exist at all. Getting this wrong yields a
-table of `-` in every column rather than an error. `.path` is a `Type:value` pair
-(`Folder:group-d1`), not an inventory path — useful as a stable identifier, not as
-something to show a human on its own.
+`.systemName` and `.description`. Neither `.alarm.info.name` nor `.entity.name` exists at
+all, and getting this wrong yields a table of `-` in every column rather than an error.
+`.path` is a `Type:value` pair (`Folder:group-d1`), not an inventory path — useful as a
+stable identifier, not as something to show a human on its own.
+
+**Print `.name.name`; key on `.name.systemName`. They are different fields for different
+jobs, and the fourth column above exists to keep them apart.**
+
+- `.name.name` is the human-readable label — *"Host memory usage"*, *"Root user password
+  expired."* This is what belongs in a report.
+- `.name.systemName` is vCenter's own identifier for its built-in alarms —
+  `alarm.HostMemoryUsageAlarm`. Stable across triggers, so it is the right baseline key,
+  but printing it puts a dotted constant in front of a human.
+
+**`.systemName` is absent on any alarm vCenter did not define itself** — verified against a
+live 7.x vCenter, where the triggered appliance alarms carried `.name.name` and no
+`.systemName` at all. So both readings need the fallback shown above, in opposite orders,
+and a baseline key built on `.systemName` alone silently collapses every operator-created
+alarm into one.
+
+Through `wrapper/govc-safe` the two fields also behave differently: `.name.name` is
+operator text and is redacted, while `.systemName` is a vSphere constant and passes
+through. That is the reverse of what you might expect, and it is why the wrapper's own
+health check leads with the status and the entity rather than the label.
 
 Use the **bare form**. Triggered alarms propagate up the inventory hierarchy and `PATH`
 already defaults to `/`, so one call returns every triggered alarm in the environment —
@@ -374,7 +394,7 @@ Key scheme is `<check-slug>:<inventory-path>`, with `alarm:` taking a third fiel
 | Check | Key |
 |---|---|
 | 1 hosts | `host-state:<host path>` |
-| 2 alarms | `alarm:<.path>:<.name.systemName>` — `.path` is the `Type:value` MoRef pair |
+| 2 alarms | `alarm:<.path>:<.name.systemName // .name.name>` — `.path` is the `Type:value` MoRef pair. The fallback is not optional: `.systemName` is absent on every alarm vCenter did not define itself, so keying on it alone collapses all of them into one |
 | 3 datastores | `ds-capacity:<datastore path>` · `ds-access:<datastore path>` |
 | 4 snapshots | `snapshot:<vm path>` · `consolidate:<vm path>` |
 | 5 Tools | `tools:<vm path>` |

@@ -250,6 +250,19 @@ SCHEMA_NAME_SIBLINGS = ("val", "op", "unit")
 # through the `configurationEx` read above.
 USER_NAMED_SIBLING = "userCreated"
 
+# Keys whose value is a vSphere-defined constant rather than anything about this
+# environment. Same fault as SCHEMA_NAME_SIBLINGS above, in a shape the sibling
+# test cannot see: these are dotted, so the FQDN sweep ate them, and a triggered
+# built-in alarm came back named FQDN-2657 instead of alarm.HostMemoryUsageAlarm.
+#
+# Safe to exempt because vCenter populates `systemName` only for its own built-in
+# alarms -- an operator-created alarm leaves it absent, and its operator-written
+# label lives in the adjacent `name`, which is still redacted as free text.
+# `eventTypeId` is a vim class name (`vim.event.…`) for the same reason.
+#
+# Compared lower-cased, like FREE_TEXT_KEYS, because govc's JSON casing varies.
+SCHEMA_VALUE_KEYS = {"systemname", "eventtypeid"}
+
 TYPE_PREFIX = {
     "Datacenter": "DC", "VirtualMachine": "VM", "HostSystem": "HOST",
     "ClusterComputeResource": "CLUSTER", "ComputeResource": "CLUSTER",
@@ -694,6 +707,8 @@ def redact_json(obj, tmap):
                 out[k] = v
             elif k == "name" and user_name:
                 out[k] = "[redacted: free text]"
+            elif k.lower() in SCHEMA_VALUE_KEYS and isinstance(v, str):
+                out[k] = v
             elif k.lower() in FREE_TEXT_KEYS and isinstance(v, str) and v.strip():
                 out[k] = "[redacted: free text]"
             else:
