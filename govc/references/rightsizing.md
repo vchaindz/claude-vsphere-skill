@@ -30,12 +30,13 @@ vms=$(govc find / -type m -runtime.powerState poweredOff)
   sort -k2 -hr
 ```
 
-Measured on a real estate: **26 of 44 VMs powered off, holding 1,102 GB**. That is the
+On a small production estate this was the largest single figure by a wide margin: well over
+half the VMs powered off, holding roughly a terabyte. That is the
 headline number for most reclamation reports, and it needs no metric history at all.
 
 A powered-off VM also still counts against configured vCPU and vRAM totals — see
 `references/capacity-planning.md`, where the same VMs push the configured memory ratio to
-1.39:1 while powered-on memory sits at 0.77:1.
+well above 1:1 while powered-on memory sits comfortably below it.
 
 **Age matters more than size.** Off for a week is a maintenance window; off for a year is a
 decision nobody made. If event retention reaches back far enough, the last power-off event
@@ -84,13 +85,14 @@ Three shapes are known to occur:
 
 | Source | `folderPath` |
 |---|---|
-| vCenter 7.0.3, subfolder | `[nvme] opv_pa_622/` — space after `]`, trailing slash |
+| vCenter 7.x, subfolder | `[datastore1] some-vm/` — space after `]`, trailing slash |
 | vcsim, subfolder | `[LocalDS_0]/DC0_C0_RP0_VM0` — no space, no trailing slash |
-| either, datastore root | `[nvme]` — no path component at all |
+| either, datastore root | `[datastore1]` — no path component at all |
 
 The registered set uses `[datastore] folder/file.vmdk` with a single space, so anything else
 matches nothing and *every* file looks orphaned. That failure is silent and confident: the
-first real run of this scan reported **97 candidates out of 97 files**, no error, no clue.
+first real run of this scan flagged **every file on the datastore** as a candidate, with no
+error and no clue.
 Normalising all three shapes to the canonical form is what makes the diff meaningful — and
 what lets the scan be smoke-tested against the simulator at all.
 
@@ -129,9 +131,9 @@ done < /tmp/candidates.txt | sort -hr
 
 `fileSize` is **absent** for zero-byte files, hence `// 0`.
 
-Measured on a real estate: 82 registered descriptors against 97 on disk → 15 raw
-candidates, 12 after excluding `-digest` and snapshot deltas, totalling **61.9 GB** — mostly
-old appliance images in folders whose VMs were removed without deleting the files.
+On a small production estate the diff came out at a handful of raw candidates, roughly a
+dozen after excluding `-digest` and snapshot deltas — mostly old appliance images in folders
+whose VMs were removed without deleting the files.
 
 ### False positives you must warn about
 
@@ -177,9 +179,9 @@ real estate where no VM reported the field at all. Hence `// 0` on every quickSt
 here; treating absence as "unknown" and skipping the VM would exclude precisely the healthy
 ones you are looking for.
 
-The gap is usually larger than people expect. Measured on real VMs with 219 days of uptime:
-`gitlab-runner` at 20,480 MB configured against 204 MB guest usage, `docker-proxy` at
-2,048 MB against 61 MB. Those are candidates worth a conversation, not automatic resizes —
+The gap is usually larger than people expect. On VMs with months of uptime it is routine to
+find 20 GB configured against a couple of hundred MB in use, and 2 GB against a few dozen.
+Those are candidates worth a conversation, not automatic resizes —
 a VM sized for a quarterly batch job looks idle for eleven weeks out of twelve.
 
 QuickStats is a point-in-time reading, so this first pass finds candidates, not conclusions.
@@ -225,7 +227,7 @@ are not equally certain:
 | Idle VMs | none without history | Gated, or not reported |
 
 Never present a single summed "reclaimable" figure that mixes them. An admin acting on
-1,102 GB of powered-off VMs is on solid ground; acting on 61.9 GB of orphan candidates
+a terabyte of powered-off VMs is on solid ground; acting on orphan candidates
 without checking is how a restore gets tested.
 
 ## Gotchas

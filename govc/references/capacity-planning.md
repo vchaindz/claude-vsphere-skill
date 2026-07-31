@@ -93,7 +93,7 @@ storage provisioned = Σ committed + Σ uncommitted   / Σ datastore capacity
 Compute each twice — for all VMs, and for powered-on VMs only. The gap between them is
 your dormant demand: capacity you are not using today but have already promised.
 
-Worked example, measured on a real single-host cluster (32 cores, 2495 MHz, 256 GB):
+Worked example, from a single-host cluster (32 cores, ~2.5 GHz, 256 GB):
 
 | Ratio | All VMs (44) | Powered-on (18) |
 |---|---|---|
@@ -222,8 +222,8 @@ Thresholds are in `references/report-template.md`; this file states none of its 
 
 - **Thin provisioning is the overhang that bites.** `summary.uncommitted` on a datastore is
   what thin disks would consume if every one inflated. Measured on a real datastore:
-  **498 GB free against 963 GB uncommitted** — fully inflating its thin disks needs twice
-  the space that exists. That is a `sev-warning` on provisioned-vs-capacity even though the
+  a datastore reporting roughly 500 GB free against nearly 1 TB uncommitted — fully
+  inflating its thin disks needs about twice the space that exists. That is a `sev-warning` on provisioned-vs-capacity even though the
   used percentage looks fine, and it is invisible if you only report free space. vcsim does
   not expose `uncommitted` at all, so this can only be checked against a real vCenter.
 - **A powered-off VM still holds its storage and its promise.** It contributes to

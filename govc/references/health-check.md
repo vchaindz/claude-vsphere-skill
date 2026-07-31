@@ -285,8 +285,8 @@ govc tasks -b 24h -n 1000 -l -json |
   jq -s -r '[.[] | select(.state == "error")] | "failed tasks (24h): \(length)"'
 ```
 
-Measured on vCenter 7.0.3 with 44 VMs: **1000 events reached back 3.0 hours**, and 500
-reached 1.5 hours. A busier estate reaches less. So this check answers "has anything gone
+Measured on a vCenter 7.x with a few dozen VMs: **1000 events reached back about three
+hours**, and 500 reached half that. A busier estate reaches less. So this check answers "has anything gone
 wrong recently", not "in the last day", and the report must name the real window —
 `sev-info`, with the span in the `.desc`.
 
