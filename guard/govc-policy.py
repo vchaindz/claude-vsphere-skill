@@ -70,6 +70,7 @@ file and this script, so neither can be edited through the file tools.
 Self-test: govc-policy.py --selftest
 """
 
+import bisect
 import json
 import os
 import re
@@ -308,24 +309,66 @@ STDIN_EXECUTORS = SHELL_RUNNERS | {"at", "batch", "crontab"}
 MAX_LOOKBACK = 4096
 
 
-def command_word(text, pos):
-    """The command word governing position `pos`, or None if `pos` IS one.
+def unquoted_breaks(text):
+    """Offsets where a new simple command may begin — just past each separator
+    or subshell opener that is NOT inside quotes.
 
-    Walks back to the nearest separator or subshell opener, then reads forward
-    past assignment prefixes and flags to the word actually being run.
+    Tracking quotes is the whole point, and scanning FORWARD is what makes it
+    possible: quote state is only knowable from a known-good starting point,
+    which is why the first version of this walked backwards and got it wrong.
+    `grep -n 'a\\|b' file` read as a pipeline because the `|` sits in a quoted
+    pattern, so the command word came out as whatever followed it rather than
+    `grep`, and ordinary greps were refused.
+
+    If the quoting does not balance, the structure cannot be trusted at all, so
+    every separator counts — that over-classifies, which is the safe direction,
+    and it closes `echo \\" ; govc vm.destroy` where a stray escaped quote would
+    otherwise swallow the rest of the line.
     """
-    floor = max(0, pos - MAX_LOOKBACK)
-    i = pos - 1
-    while i >= floor and text[i] in " \t":
-        i -= 1
-    if i < floor or text[i] in CMD_OPENERS:
-        return None                     # start of text, or right after | && $( `
-    j = i
-    while j >= floor and text[j] not in CMD_OPENERS:
-        j -= 1
-    if j < floor and floor > 0:
-        return None                     # ran out of lookback: classify
-    head = text[j + 1:pos]
+    breaks, quote, i, n = [0], None, 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "\\" and quote != "'":
+            i += 2                      # a backslash escapes the next character
+            continue
+        if quote == '"':
+            # Double quotes suppress the list separators but NOT command
+            # substitution: "$(govc vm.destroy)" and "`govc vm.destroy`" both
+            # run. A bare `(` in double quotes is literal, which is what lets
+            # `echo "### (calls govc) here"` stay a mention.
+            if ch == '"':
+                quote = None
+            elif ch == "`" or (ch == "(" and i and text[i - 1] == "$"):
+                breaks.append(i + 1)
+        elif quote == "'":
+            if ch == "'":
+                quote = None            # single quotes make everything literal
+        elif ch in "'\"":
+            quote = ch
+        elif ch in CMD_OPENERS:
+            breaks.append(i + 1)
+        i += 1
+    if quote is not None:
+        return [0] + [j + 1 for j, c in enumerate(text) if c in CMD_OPENERS]
+    return breaks
+
+
+def command_start(breaks, pos):
+    """Offset at which the simple command containing `pos` begins."""
+    return breaks[max(0, bisect.bisect_right(breaks, pos) - 1)]
+
+
+def command_word(text, start, pos):
+    """The command word governing `pos`, or None if `pos` IS one.
+
+    Reads forward from the start of the simple command, past assignment
+    prefixes and flags, to the word actually being run.
+    """
+    if pos - start > MAX_LOOKBACK:
+        return None                     # too far to judge cheaply: classify
+    head = text[start:pos]
+    if not head.strip():
+        return None                     # govc is the command word itself
     try:
         toks = shlex.split(head)
     except ValueError:
@@ -599,13 +642,14 @@ def extract_invocations(cmd):
     way each case falls, and why the default is still to classify.
     """
     suppress = not reads_stdin_shell(cmd)
+    breaks = unquoted_breaks(cmd) if suppress else None
     for m in CALL_RE.finditer(cmd):
         if suppress:
-            word = command_word(cmd, m.start())
+            start = command_start(breaks, m.start())
+            word = command_word(cmd, start, m.start())
             if word in FILE_CONSUMERS:
                 continue
-            if word in PATH_CONSUMERS and plain_operand(
-                    cmd, m, max(0, m.start() - MAX_LOOKBACK)):
+            if word in PATH_CONSUMERS and plain_operand(cmd, m, start):
                 continue
         tail = cmd[m.end():]
         # cut at the next shell separator so one invocation's args don't
@@ -1076,6 +1120,33 @@ def selftest():
         # the accepted cost, asserted so it is a decision and not a surprise:
         # a path behind a flag cannot be told from a flag's value
         ("git add -f wrapper/govc-safe",                  "readonly", "deny"),
+
+        # --- a separator inside quotes is data, not a separator -----------
+        # Finding the command word by walking BACKWARDS could not know quote
+        # state, so any | ; & ( { or backtick inside a quoted string ended the
+        # scan early and the word came out as whatever followed it. Ordinary
+        # greps and echoes were refused.
+        ("grep -n 'GOVC_A\\|exe = GOVC_B' wrapper/govc-safe", "readonly", None),
+        ("echo \"### does it invoke govc as claimed?\"",   "readonly", None),
+        ("echo \"### (calls govc) here\"",                 "readonly", None),
+        ("grep -c 'a;b' wrapper/govc-safe",                "readonly", None),
+        ("grep -c 'a&b' wrapper/govc-safe",                "readonly", None),
+        ("awk -F'|' '{print}' x; cat wrapper/govc-safe",   "readonly", None),
+        # ...while a real separator outside quotes still starts a command
+        ("echo \"it's fine\"; govc vm.destroy x",          "standard", "deny"),
+        ("echo 'x' | govc vm.destroy y",                   "standard", "deny"),
+        ("grep -n 'a\\|b' f && govc vm.destroy x",         "standard", "deny"),
+        ("echo \"(a)\" && govc vm.destroy x",              "standard", "deny"),
+        # double quotes silence the separators but not command substitution
+        ("echo \"$(govc vm.destroy x)\"",                  "standard", "deny"),
+        ("echo \"`govc vm.destroy x`\"",                   "standard", "deny"),
+        ("echo \"prefix $(govc vm.destroy x) suffix\"",    "standard", "deny"),
+        # ...whereas single quotes silence substitution too
+        ("echo '$(govc vm.info x)'",                       "readonly", None),
+        # an unbalanced quote makes the structure untrustworthy, so every
+        # separator counts again rather than the rest of the line being eaten
+        ("echo \\\" ; govc vm.destroy x",                  "standard", "deny"),
+        ("echo 'unterminated ; govc vm.destroy x",         "standard", "deny"),
 
         # shell quote-concatenation in the subcommand. shlex joins the parts,
         # so these resolve to vm.destroy rather than to an unknown verb.
