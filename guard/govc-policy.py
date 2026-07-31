@@ -386,8 +386,15 @@ def plain_operand(text, m, floor):
     tok = text[ts:te]
     if "=" in tok or any(c in tok for c in " \t\n'\""):
         return False                     # flag=command, or a quoted command line
-    if len(spans) > 1 and text[spans[-2][0]] == "-":
-        return False                     # the value of a flag
+    if len(spans) > 1:
+        ps, pe = spans[-2]
+        prev = text[ps:pe]
+        # `--` is the end-of-options marker, not an option: everything after it
+        # is an operand by definition. Without this, `git diff -- <path>` —
+        # the ordinary way to name a file to git — read as a flag's value and
+        # was refused.
+        if prev != "--" and prev.startswith("-"):
+            return False                 # the value of a flag
     return True
 
 
@@ -1058,6 +1065,14 @@ def selftest():
         ("git checkout wrapper/govc-safe",                "readonly", None),
         ("sort wrapper/govc-safe",                        "readonly", None),
         ("rg -n TOKEN_RE wrapper/govc-safe",              "readonly", None),
+        # `--` ends the options, so what follows is an operand. This is how one
+        # ordinarily names a path to git, and the first version of this rule
+        # refused it.
+        ("git diff --stat HEAD~4 -- wrapper/govc-safe",   "readonly", None),
+        ("git checkout HEAD -- wrapper/govc-safe",        "readonly", None),
+        ("git log --oneline -- wrapper/govc-safe",        "readonly", None),
+        # ...but `--` does not turn a quoted command line into an operand
+        ("git -c core.pager='govc vm.destroy' log -- x",  "standard", "deny"),
         # the accepted cost, asserted so it is a decision and not a surprise:
         # a path behind a flag cannot be told from a flag's value
         ("git add -f wrapper/govc-safe",                  "readonly", "deny"),
