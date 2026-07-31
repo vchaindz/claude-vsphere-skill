@@ -169,6 +169,7 @@ Read the reference file matching the task — each contains commands, tested pat
 | Hosts and clusters: maintenance, DRS/HA, rules, resource pools, esxcli | `references/host-cluster.md` |
 | Host patch day: pre-flight, evacuate, verify, roll back | `references/patching.md` |
 | Performance history: intervals, retention, trends, idle detection | `references/metrics.md` |
+| Capacity planning: overcommit ratios, N+1 headroom, growth | `references/capacity-planning.md` |
 | Datastores, disks, networking (vSwitch/DVS/portgroups) | `references/storage-network.md` |
 | Environment health check: the fixed nine-check list, severities, baseline diff | `references/health-check.md` |
 | HTML report deliverables: template, severity rules, structure | `references/report-template.md` |
