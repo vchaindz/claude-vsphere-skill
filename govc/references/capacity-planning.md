@@ -57,7 +57,7 @@ govc find / -type m | tr '\n' '\0' | xargs -0 govc vm.info -json |
     "poweredOn=\([.[]|select(.runtime.powerState=="poweredOn")]|length) vCPU_on=\([.[]|select(.runtime.powerState=="poweredOn")|.config.hardware.numCPU]|add) vRAM_on_MB=\([.[]|select(.runtime.powerState=="poweredOn")|.config.hardware.memoryMB]|add)"'
 ```
 
-**Units differ per field, including inside the same struct.** Verified on vCenter 7.0.3:
+**Units differ per field, including inside the same struct.** Verified against vCenter 7.x:
 
 | Field | Unit |
 |---|---|
@@ -72,9 +72,9 @@ Mixing `totalMemory` and `effectiveMemory` because they sit side by side is the 
 easiest way to be wrong by a factor of a million here.
 
 **Total vs effective.** `totalCpu` is the raw sum of `numCpuCores × cpuMhz`; `effectiveCpu`
-is what remains for VMs after virtualisation overhead and reservations. Measured on a
-32-core host: 79,840 MHz total against 71,082 MHz effective — about 11% gone before a
-single VM runs. **Plan against effective**, and check your arithmetic against
+is what remains for VMs after virtualisation overhead and reservations. On a typical host
+the gap runs to roughly a tenth of raw capacity — gone before a single VM starts.
+**Plan against effective**, and check your arithmetic against
 `cluster.usage`, whose `cpu.capacity` equals `totalCpu` exactly. That agreement is the
 cheap proof your per-host sum is right before you build anything on it.
 
@@ -93,16 +93,20 @@ storage provisioned = Σ committed + Σ uncommitted   / Σ datastore capacity
 Compute each twice — for all VMs, and for powered-on VMs only. The gap between them is
 your dormant demand: capacity you are not using today but have already promised.
 
-Worked example, from a single-host cluster (32 cores, ~2.5 GHz, 256 GB):
+Illustrative example — a three-host cluster, 20 cores each at 2.6 GHz, 256 GB per host
+(60 cores, 156,000 MHz raw / ~140,000 effective, ~737,000 MB effective memory), carrying
+120 VMs of which 90 are powered on:
 
-| Ratio | All VMs (44) | Powered-on (18) |
+| Ratio | All VMs (120) | Powered-on (90) |
 |---|---|---|
-| vCPU : core | 113 / 32 = **3.53:1** | 48 / 32 = **1.50:1** |
-| vRAM : effective | 345,472 / 248,896 = **1.39:1** | 191,488 / 248,896 = **0.77:1** |
+| vCPU : core | 140 / 60 = **2.33:1** | 100 / 60 = **1.67:1** |
+| vRAM : effective | 900,000 / 737,000 = **1.22:1** | 640,000 / 737,000 = **0.87:1** |
 
 Read that pair carefully before reporting it. Powered-on memory fits comfortably; the
-*configured* total already exceeds physical memory by 39%. Nothing is wrong today, and
-nothing will be until enough of those 26 powered-off VMs start at once.
+*configured* total already exceeds effective memory by 22%. Nothing is wrong today, and
+nothing will be until enough of the 30 powered-off VMs start at once. This shape — a
+comfortable present and an overcommitted promise — is the common one, and reporting only
+the powered-on column hides it.
 
 ### The same ratios without one host (N+1)
 
@@ -162,18 +166,17 @@ Show the arithmetic in the report. A consultant has to defend the number in a ro
 ### Worked example
 
 Same cluster, profile 4 vCPU / 8 GB / 100 GB, targets 4:1 and 1:1, 80% datastore ceiling.
-As a single-host cluster it has no N+1 basis, so this is computed **all-hosts** and labelled
-as such — which is precisely the caveat that makes the number honest:
+On the N+1 basis one host is removed, leaving 40 cores and ~491,000 MB effective:
 
 ```
-fit_cpu  = (32 × 4  − 113)      / 4    = 3.75  → 3
-fit_mem  = (248896 × 1 − 345472) / 8192 = negative → 0
-fit_disk = (6130 × 0.80 − 5761)  / 100  = 1.14  → 1
+fit_cpu  = (40 × 4     − 140)     / 4    = 5.0     → 5
+fit_mem  = (491000 × 1 − 900000)  / 8192 = negative → 0
+fit_disk = (30000 × 0.80 − 21500) / 100  = 25.0    → 25
 headroom = 0, limited by memory
 ```
 
 Configured memory already exceeds effective memory, so on paper there is no room for
-another VM at a 1:1 target — while powered-on memory sits at 0.77:1 and the cluster feels
+another VM at a 1:1 target — while powered-on memory sits at 0.87:1 and the cluster feels
 idle. Both statements are true. Report them together: the estate has run out of *committed*
 memory headroom long before it runs out of *used* memory, and that is the number that
 matters the day everything powers on at once.

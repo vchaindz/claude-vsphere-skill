@@ -97,7 +97,7 @@ where DRS was never configured — absent means never set up, `false` means set 
 and on patch day those lead to different decisions.
 
 **Read `enabled` before you read the mode, and never the mode alone.** Verified on vCenter
-7.0.3: a cluster with `drsConfig.enabled = false` still reports
+7.x: a cluster with `drsConfig.enabled = false` still reports
 `defaultVmBehavior: fullyAutomated`, because that is the configured default waiting to be
 used rather than a statement that it is in use. A pre-flight that checks only the mode will
 report "DRS fullyAutomated, evacuation will be automatic" about a cluster where DRS is

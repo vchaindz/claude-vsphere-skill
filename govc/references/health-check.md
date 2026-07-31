@@ -226,11 +226,11 @@ absent is `null` (never configured); one that is present and `false` is configur
 switched off. Those are different findings. The alternative operator `//` fires on `false`
 as well as `null`, so `.dasConfig.enabled // "not-configured"` reports a cluster with HA
 deliberately *disabled* as one where HA was never set up. Test for `null` explicitly, as the
-`def b(x)` above does. This is not hypothetical: real vCenter 7.0.3 returns
+`def b(x)` above does. This is not hypothetical: real vCenter 7.x returns
 `dasConfig.enabled = false`, while vcsim returns `dasConfig` as an empty object, so the two
 environments exercise both branches.
 
-**`defaultVmBehavior` is populated even when DRS is off.** Verified on vCenter 7.0.3: a
+**`defaultVmBehavior` is populated even when DRS is off.** Verified on vCenter 7.x: a
 cluster with `drsConfig.enabled = false` still reports `defaultVmBehavior: fullyAutomated`,
 because that is the configured default waiting to be used, not a statement that it is in
 use. Read `enabled` first and only then the mode; reporting the mode alone says DRS is

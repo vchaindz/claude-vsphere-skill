@@ -32,7 +32,7 @@ interval or change its retention:
 govc metric.interval.info
 ```
 
-Measured on vCenter 7.0.3: all four enabled, sample counts exactly as tabled, with the
+Measured on vCenter 7.x: all four enabled, sample counts exactly as tabled, with the
 5-minute interval at statistics **Level 2** and the other three at **Level 1**.
 
 ## Is the data there? The two-step gate
@@ -46,7 +46,7 @@ govc metric.info /DC1/vm/web-01 cpu.usage.average           # 2. is the counter 
 ```
 
 `metric.info` prints the counter's own `Level:` and the `Intervals:` it lives in. A counter
-is collected when its level is at or below the interval's level. Measured on 7.0.3:
+is collected when its level is at or below the interval's level. Measured on 7.x:
 `cpu.usage.average`, `mem.usage.average`, `net.usage.average` and `disk.usage.average` are
 all **Level 1** and all list `Past day,Past week,Past month,Past year` — so on a
 default-configured vCenter the four counters a trend or idle analysis needs are present at
