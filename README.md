@@ -8,6 +8,7 @@ Ask in plain language:
 > "VM web-01 was down last night. Find out what happened and when."
 > "Datastore capacity report — flag anything over 85% full."
 > "Prepare esx02 for patching."
+> "Health check as an HTML file I can send to the customer." ([what that looks like](#reports-you-can-hand-to-someone))
 
 And Claude picks the right govc commands, batches queries efficiently, parses the JSON, and answers like a colleague — including pushing back when your premise is wrong:
 
@@ -210,6 +211,63 @@ powershell -ExecutionPolicy Bypass -File .\test-windows.ps1
 
 Recommended first interactive test: start `claude`, ask for an inventory report, then ask it to destroy a test VM — it should list the VM and ask for confirmation before doing anything.
 
+## Reports you can hand to someone
+
+Quick questions get answered as a Markdown table in the chat. Ask for a report **as a
+file** and you get a single self-contained HTML document instead — one file, no CDN links,
+no external fonts or images, so it survives being emailed, archived, or opened on an
+air-gapped management workstation.
+
+Any of these triggers it:
+
+> "Health check as an HTML file."
+> "Snapshot audit — save it as a report I can send to the customer."
+> "Write me a capacity report for the ACME assessment."
+
+![Generated environment health check report](images/report-example.png)
+
+*(The real file, generated against the vcsim simulator — [examples/health-check-vcsim-2026-07-30.html](examples/health-check-vcsim-2026-07-30.html). Cropped; the full report continues with VM, snapshot and alarm sections.)*
+
+**Findings come first.** Every report opens with a severity-ordered findings table — worst
+first, each row naming the *exact* affected objects and a concrete recommended action.
+A healthy category is stated as a finding too ("checked and found healthy"), because
+silence is not a result. Then KPI cards for the headline numbers, then the supporting data
+tables with click-to-sort columns.
+
+**Every number is auditable.** Each section states the govc command it came from and the
+thresholds applied, and the footer records how the data was gathered. If a query failed,
+the report says "not collected" and why — it never guesses. Default thresholds (overridable
+by just saying so):
+
+| Check | Warning | Critical |
+|---|---|---|
+| Datastore used | ≥ 75% | ≥ 85% |
+| Snapshot age | > 3 days | > 7 days, or > 3 in a chain |
+| Host disconnected / unexpectedly in maintenance | — | always |
+| VMware Tools | not running | — |
+| Triggered alarms | yellow | red |
+
+Files are named `<report-type>-<environment>-<YYYY-MM-DD>.html`. Say it's for a client (or
+name one) and you additionally get the client name in the header and an executive summary
+in prose above the tables, with recommendations phrased as recommendations.
+
+### Seeing it before you install anything
+
+`examples/` holds the same health check generated twice against the simulator:
+
+| File | What it shows |
+|---|---|
+| [`health-check-vcsim-2026-07-30.html`](examples/health-check-vcsim-2026-07-30.html) | normal output, real object names |
+| [`health-check-vcsim-tokens-2026-07-30.html`](examples/health-check-vcsim-tokens-2026-07-30.html) | the identical report with the [privacy wrapper](#optional-keeping-real-identifiers-away-from-the-model) active — every name, MoRef, UUID and address replaced by a stable pseudonym, and the vCenter endpoint withheld |
+
+Open them side by side: same findings, same numbers, same layout. The only difference is
+whether a real identifier ever left the host. With the wrapper active a report is written
+in tokens, and `govc-safe rehydrate <file>` gives you a cleartext copy locally.
+
+The template itself is `govc/assets/report-template.html`; the rules for filling it —
+structure, severity vocabulary, thresholds, consultant mode — are in
+`govc/references/report-template.md`.
+
 ## What's in the skill
 
 ```
@@ -228,24 +286,7 @@ govc/
     └── storage-network.md        # datastores, disks, vSwitch/DVS/portgroups
 ```
 
-Ask for any report "as a file" and it lands as a polished, self-contained HTML
-deliverable: findings first (severity-badged, exact objects named, recommended
-actions), KPI summary cards, sortable data tables, and per-section source commands
-and thresholds so every number is auditable. No CDN or external assets — safe to
-email or open on an air-gapped workstation.
-
-See it before you install it — `examples/` holds the same health check generated twice
-against the vcsim simulator:
-
-| File | What it shows |
-|---|---|
-| `examples/health-check-vcsim-2026-07-30.html` | normal output, real object names |
-| `examples/health-check-vcsim-tokens-2026-07-30.html` | the identical report with the [privacy wrapper](#optional-keeping-real-identifiers-away-from-the-model) active — every name, MoRef, UUID and address replaced by a stable pseudonym, and the vCenter endpoint withheld |
-
-Open them side by side: same findings, same numbers, same layout — the only difference is
-whether a real identifier ever left the host.
-
-Battle-tested details baked in from real-world runs: PowerShell splits unquoted dotted flags like `-runtime.powerState` (quote them), `host.info` needs an explicit host when there's more than one, multi-datacenter vCenters need `-dc`/`GOVC_DATACENTER` context, an empty datacenter answers `datastore.info` with a misleading "not found", `snapshot.remove` rejects the `id` integer that `vm.info -json` shows and wants the `snapshot-NNNNN` managed object ID instead, a snapshot audit must recurse into `childSnapshotList` or it reports a deep chain as a single snapshot, `jq`'s `fromdateiso8601` rejects the fractional seconds vSphere puts in every timestamp, `govc events` has no time window at all — only a count — and `govc cluster.info` does not exist, so HA and DRS state come from `govc collect -json <cluster> configurationEx` — read whole, because the nested path a simulator happily accepts fails on a real vCenter with `InvalidProperty`.
+Battle-tested details baked in from real-world runs: PowerShell splits unquoted dotted flags like `-runtime.powerState` (quote them), `host.info` needs an explicit host when there's more than one, multi-datacenter vCenters need `-dc`/`GOVC_DATACENTER` context, an empty datacenter answers `datastore.info` with a misleading "not found", `snapshot.remove` rejects the `id` integer that `vm.info -json` shows and wants the `snapshot-NNNNN` managed object ID instead, a snapshot audit must recurse into `childSnapshotList` or it reports a deep chain as a single snapshot, `jq`'s `fromdateiso8601` rejects the fractional seconds vSphere puts in every timestamp, `govc events` has no time window at all — only a count, capped at 1000, above which it returns *zero* events rather than an error — and `govc cluster.info` does not exist, so HA and DRS state come from `govc collect -json <cluster> configurationEx`, read whole, because the nested path a simulator happily accepts fails on a real vCenter with `InvalidProperty`.
 
 Every reference file is cross-platform: bash examples work on Linux, macOS, WSL, and Git Bash, and each command that behaves differently under native PowerShell carries a `powershell` twin. Batch pipelines use `tr '\n' '\0' | xargs -0` rather than the GNU-only `xargs -d '\n'`, so they run unmodified on macOS and survive VM names containing spaces.
 
