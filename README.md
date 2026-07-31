@@ -253,16 +253,27 @@ in prose above the tables, with recommendations phrased as recommendations.
 
 ### Seeing it before you install anything
 
-`examples/` holds the same health check generated twice against the simulator:
+`examples/` holds three reports — a matched pair from the simulator, and one from a real
+environment:
 
 | File | What it shows |
 |---|---|
 | [`health-check-vcsim-2026-07-30.html`](examples/health-check-vcsim-2026-07-30.html) | normal output, real object names |
 | [`health-check-vcsim-tokens-2026-07-30.html`](examples/health-check-vcsim-tokens-2026-07-30.html) | the identical report with the [privacy wrapper](#optional-keeping-real-identifiers-away-from-the-model) active — every name, MoRef, UUID and address replaced by a stable pseudonym, and the vCenter endpoint withheld |
+| [`health-check-real-tokens-2026-07-31.html`](examples/health-check-real-tokens-2026-07-31.html) | a production estate, collected read-only through the wrapper — **findings that are actually findings**, and three of the nine checks not completed |
 
-Open them side by side: same findings, same numbers, same layout. The only difference is
-whether a real identifier ever left the host. With the wrapper active a report is written
-in tokens, and `govc-safe rehydrate <file>` gives you a cleartext copy locally.
+Open the first two side by side: same findings, same numbers, same layout. The only
+difference is whether a real identifier ever left the host. With the wrapper active a report
+is written in tokens, and `govc-safe rehydrate <file>` gives you a cleartext copy locally.
+
+The third exists because the simulator cannot produce the two things an admin most needs to
+recognise. First, real findings: an expired appliance root password, and a snapshot that has
+been open for 1358 days. Second, and more useful, *real gaps* — one check refused by the
+wrapper's property allowlist, one that reached under three hours of events instead of the
+24 the check is named for, and one that is opt-in and was skipped. All three are reported as
+`sev-info` with the reason stated, which is the rule that matters: a check that did not run
+is never `sev-ok`. A report whose every line is green because nothing was collected is worse
+than no report.
 
 The template itself is `govc/assets/report-template.html`; the rules for filling it —
 structure, severity vocabulary, thresholds, consultant mode — are in
@@ -551,7 +562,7 @@ changes.
 | `guard/` | Optional deterministic security layer: policy hook, installer, tests |
 | `wrapper/` | Optional pseudonymising proxy, hooks, installer, and both test suites |
 | `wrapper/govc-private/` | Companion skill for token-space operation |
-| `examples/` | Generated HTML reports (vcsim), with and without the wrapper |
+| `examples/` | Generated HTML reports — a vcsim pair with and without the wrapper, plus one tokenised run against a real environment |
 | `docs/` | Operator documentation that is not part of the skill (scheduled runs) |
 | `test-windows.ps1` | Windows setup + smoke test against vcsim |
 | `test-unix.sh` | Linux/macOS setup + smoke test against vcsim (`--vcsim`) or a real vCenter |

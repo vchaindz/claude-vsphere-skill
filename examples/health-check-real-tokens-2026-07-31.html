@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Environment Health Check — Production estate (tokenised)</title>
+<!--
+  Example output of govc/references/health-check.md, rendered from
+  govc/assets/report-template.html.
+
+  Unlike the two vcsim examples beside it, this one was collected from a real
+  production vCenter, read-only, through wrapper/govc-safe. Every host, VM,
+  datastore, datacenter and cluster name below is a stable pseudonym.
+
+  It is here because the simulator cannot produce the thing an admin most needs
+  to see: a report with genuine findings, and genuine gaps. Three of the nine
+  checks did not complete, and how the report says so is the point.
+-->
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --ink: #1c2733; --muted: #5f6b7a;
+    --line: #e3e7ec; --accent: #0b6bcb;
+    --critical: #c62828; --critical-bg: #fdecea;
+    --warning: #b26a00; --warning-bg: #fff4e0;
+    --ok: #2e7d32; --ok-bg: #e8f5e9;
+    --info: #37474f; --info-bg: #eceff1;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 24px 64px; }
+
+  /* ---------- header ---------- */
+  header { border-bottom: 3px solid var(--accent); padding-bottom: 18px; margin-bottom: 24px; }
+  header h1 { margin: 0 0 4px; font-size: 26px; letter-spacing: -0.3px; }
+  header .env { font-size: 17px; color: var(--accent); font-weight: 600; }
+  .meta { display: flex; flex-wrap: wrap; gap: 6px 28px; margin-top: 10px;
+          font-size: 13px; color: var(--muted); }
+  .meta b { color: var(--ink); font-weight: 600; }
+
+  /* ---------- KPI cards ---------- */
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+          gap: 12px; margin: 24px 0; }
+  .kpi { background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+         padding: 14px 16px; }
+  .kpi .n { font-size: 26px; font-weight: 700; line-height: 1.2; }
+  .kpi .l { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .kpi.sev-critical .n { color: var(--critical); }
+  .kpi.sev-warning  .n { color: var(--warning); }
+  .kpi.sev-ok       .n { color: var(--ok); }
+
+  /* ---------- badges ---------- */
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px;
+           font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .badge.sev-critical { color: var(--critical); background: var(--critical-bg); }
+  .badge.sev-warning  { color: var(--warning);  background: var(--warning-bg); }
+  .badge.sev-ok       { color: var(--ok);       background: var(--ok-bg); }
+  .badge.sev-info     { color: var(--info);     background: var(--info-bg); }
+
+  /* ---------- sections & tables ---------- */
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+            padding: 20px 22px; margin-bottom: 20px; }
+  section h2 { margin: 0 0 4px; font-size: 18px; }
+  section .desc { margin: 0 0 14px; font-size: 13.5px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line);
+           vertical-align: top; }
+  th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px;
+       color: var(--muted); border-bottom: 2px solid var(--line); user-select: none; }
+  .sortable th { cursor: pointer; }
+  .sortable th:hover { color: var(--accent); }
+  .sortable th .dir { font-size: 10px; }
+  tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: #f8fafc; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.sev-critical td:first-child { box-shadow: inset 3px 0 0 var(--critical); }
+  tr.sev-warning  td:first-child { box-shadow: inset 3px 0 0 var(--warning); }
+  .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
+  code { background: var(--info-bg); border-radius: 4px; padding: 1px 5px;
+         font: 12.5px ui-monospace, "Cascadia Code", Consolas, monospace; }
+
+  /* ---------- footer ---------- */
+  footer { margin-top: 32px; font-size: 12.5px; color: var(--muted);
+           border-top: 1px solid var(--line); padding-top: 14px; }
+
+  /* ---------- print ---------- */
+  @media print {
+    body { background: #fff; }
+    .wrap { padding: 0; max-width: none; }
+    section, .kpi { border: 1px solid #ccc; break-inside: avoid; }
+    tbody tr:hover { background: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Environment Health Check</h1>
+    <div class="env">Production estate (tokenised)</div>
+    <div class="meta">
+      <span><b>vCenter:</b> not exposed (govc-safe)</span>
+      <span><b>Version:</b> VMware vCenter Server 7.x</span>
+      <span><b>Scope:</b> 2 datacenters · 2 clusters · 1 host · 44 VMs · 4 datastores</span>
+      <span><b>Generated:</b> 2026-07-31 13:27 CEST</span>
+    </div>
+  </header>
+
+  <div class="kpis">
+    <div class="kpi sev-critical"><div class="n">2</div><div class="l">Critical findings</div></div>
+    <div class="kpi sev-critical"><div class="n">1358</div><div class="l">Days, oldest snapshot</div></div>
+    <div class="kpi sev-warning"><div class="n">24</div><div class="l">Error events in the reachable window</div></div>
+    <div class="kpi sev-ok"><div class="n">72%</div><div class="l">Fullest datastore</div></div>
+    <div class="kpi sev-ok"><div class="n">1/1</div><div class="l">Hosts connected</div></div>
+    <div class="kpi"><div class="n">44</div><div class="l">VMs (18 on, 26 off)</div></div>
+    <div class="kpi sev-warning"><div class="n">3/9</div><div class="l">Checks not completed</div></div>
+  </div>
+
+  <section id="findings">
+    <h2>Findings</h2>
+    <p class="desc">Ordered by severity. Every finding names the affected objects and a recommended action.
+      Thresholds are the defaults from <code>references/report-template.md</code>.</p>
+    <table>
+      <thead><tr><th style="width:110px">Severity</th><th>Finding</th><th>Affected objects</th><th>Recommended action</th></tr></thead>
+      <tbody>
+        <tr class="sev-critical">
+          <td><span class="badge sev-critical">Critical</span></td>
+          <td>vCenter appliance root password has expired</td>
+          <td>2 unacknowledged alarms on the root folder — 1 red, 1 yellow</td>
+          <td>Reset the appliance root password now. While it is expired, appliance shell and
+              API-level administrative access can be lost, and the yellow precursor alarm shows
+              this was signalled before it lapsed.</td>
+        </tr>
+        <tr class="sev-critical">
+          <td><span class="badge sev-critical">Critical</span></td>
+          <td>Snapshots older than 7 days</td>
+          <td>4 VMs, oldest 1358 days (<code>VM-0045</code>); also
+              <code>VM-0034</code> 1214 d, <code>VM-0007</code> 109 d, <code>VM-0012</code> 9 d</td>
+          <td>Review and consolidate. Two of these predate any plausible maintenance window —
+              a snapshot is not a backup, and its delta grows without bound against the datastore.</td>
+        </tr>
+        <tr class="sev-warning">
+          <td><span class="badge sev-warning">Warning</span></td>
+          <td>Error-category events exceed the threshold</td>
+          <td>24 error events out of 1000 retrieved</td>
+          <td>Investigate. Note the count is over 2 h 51 min, not 24 h — see the
+              &ldquo;checks not completed&rdquo; section. 24 errors in under three hours is a
+              higher rate than the &gt; 20-per-window threshold was written for.</td>
+        </tr>
+        <tr>
+          <td><span class="badge sev-ok">OK</span></td>
+          <td>All datastores below the 75% warning threshold and accessible</td>
+          <td>4 datastores, fullest at 72% (<code>DS-04</code>)</td>
+          <td>None. <code>DS-04</code> and <code>DS-05</code> are within 5 points of warning; worth watching.</td>
+        </tr>
+        <tr>
+          <td><span class="badge sev-ok">OK</span></td>
+          <td>Host connected, not in maintenance mode</td>
+          <td><code>HOST-05</code>, uptime 220 days</td>
+          <td>None. Long uptime is not itself a fault, but see patch currency separately.</td>
+        </tr>
+        <tr>
+          <td><span class="badge sev-ok">OK</span></td>
+          <td>VMware Tools running on every powered-on VM</td>
+          <td>18 of 18 powered-on VMs</td>
+          <td>None.</td>
+        </tr>
+        <tr>
+          <td><span class="badge sev-ok">OK</span></td>
+          <td>No orphaned, inaccessible or invalid VMs; no pending disk consolidation</td>
+          <td>44 VMs checked</td>
+          <td>None.</td>
+        </tr>
+        <tr>
+          <td><span class="badge sev-info">Info</span></td>
+          <td>Cluster HA / DRS / admission control not collected</td>
+          <td>2 clusters</td>
+          <td>Re-run check 6 without the privacy wrapper, or from a host with direct
+              <code>govc</code> access. This is a collection gap, not an all-clear —
+              do not read the absence of a warning here as HA being enabled.</td>
+        </tr>
+        <tr>
+          <td><span class="badge sev-info">Info</span></td>
+          <td>Event window reaches 2 h 51 min, not 24 hours</td>
+          <td>1000 events, 2026-07-31 08:31 → 11:22 UTC</td>
+          <td>None available from this API. <code>govc events</code> has no time filter and
+              caps at <code>-n 1000</code>; on a busy vCenter that is hours, not a day.
+              State the window you actually reached, never &ldquo;errors in the last 24 h&rdquo;.</td>
+        </tr>
+        <tr>
+          <td><span class="badge sev-info">Info</span></td>
+          <td>26 VMs powered off; age not determinable</td>
+          <td>26 of 44 VMs</td>
+          <td>The powered-off-age thresholds (warning &gt; 30 d, critical &gt; 90 d) need the
+              last power-off event, and event retention here reaches under three hours.
+              Reported as a count only. See <code>references/rightsizing.md</code> for the
+              reclamation angle.</td>
+        </tr>
+        <tr>
+          <td><span class="badge sev-info">Info</span></td>
+          <td>Orphaned VMDK scan not run</td>
+          <td>4 datastores</td>
+          <td>Check 9 is opt-in. <code>datastore.ls -R</code> walks every folder on every
+              datastore and puts load on the storage layer; it is never run unattended.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Datastore capacity</h2>
+    <p class="desc">Source: <code>govc datastore.info -json</code>, one <code>-dc</code> at a time.
+      Thresholds: warning &ge; 75%, critical &ge; 85%.</p>
+    <table class="sortable">
+      <thead><tr><th>Datastore</th><th>Type</th><th class="num">Capacity</th><th class="num">Free</th><th class="num">Used %</th><th>Accessible</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>DS-04</td><td>VMFS</td>
+          <td class="num" data-v="1920118816768">1788 GB</td>
+          <td class="num" data-v="534851354624">498 GB</td>
+          <td class="num" data-v="72">72%</td>
+          <td>yes</td>
+          <td><span class="badge sev-ok">OK</span></td>
+        </tr>
+        <tr>
+          <td>DS-05</td><td>VMFS</td>
+          <td class="num" data-v="1920118816768">1788 GB</td>
+          <td class="num" data-v="559498133504">521 GB</td>
+          <td class="num" data-v="70">70%</td>
+          <td>yes</td>
+          <td><span class="badge sev-ok">OK</span></td>
+        </tr>
+        <tr>
+          <td>DS-02</td><td>VMFS</td>
+          <td class="num" data-v="1920118816768">1788 GB</td>
+          <td class="num" data-v="609917861888">568 GB</td>
+          <td class="num" data-v="68">68%</td>
+          <td>yes</td>
+          <td><span class="badge sev-ok">OK</span></td>
+        </tr>
+        <tr>
+          <td>DS-03</td><td>VMFS</td>
+          <td class="num" data-v="822486237184">766 GB</td>
+          <td class="num" data-v="484571086848">451 GB</td>
+          <td class="num" data-v="41">41%</td>
+          <td>yes</td>
+          <td><span class="badge sev-ok">OK</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Hosts</h2>
+    <p class="desc">Source: <code>govc host.info -json -host &lt;host&gt;</code>, one host per call.
+      Critical if not connected, or in maintenance mode unexpectedly.</p>
+    <table class="sortable">
+      <thead><tr><th>Host</th><th>Connection</th><th>Maintenance mode</th><th class="num">Uptime</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>HOST-05</td>
+          <td>connected</td>
+          <td>no</td>
+          <td class="num" data-v="19012128">220 days</td>
+          <td><span class="badge sev-ok">OK</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Snapshots</h2>
+    <p class="desc">Source: <code>govc vm.info -json</code> batched, walking
+      <code>snapshot.rootSnapshotList[].childSnapshotList</code> recursively.
+      Thresholds: warning &gt; 3 days, critical &gt; 7 days or &gt; 3 in a chain.
+      Per-snapshot size is not reported by this API and was not collected.</p>
+    <table class="sortable">
+      <thead><tr><th>VM</th><th class="num">Snapshots</th><th class="num">Chain depth</th><th>Oldest created</th><th class="num">Age (days)</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr class="sev-critical">
+          <td>VM-0045</td>
+          <td class="num" data-v="1">1</td>
+          <td class="num" data-v="1">1</td>
+          <td>2022-11-10</td>
+          <td class="num" data-v="1358">1358</td>
+          <td><span class="badge sev-critical">Critical</span></td>
+        </tr>
+        <tr class="sev-critical">
+          <td>VM-0034</td>
+          <td class="num" data-v="1">1</td>
+          <td class="num" data-v="1">1</td>
+          <td>2023-04-04</td>
+          <td class="num" data-v="1214">1214</td>
+          <td><span class="badge sev-critical">Critical</span></td>
+        </tr>
+        <tr class="sev-critical">
+          <td>VM-0007</td>
+          <td class="num" data-v="1">1</td>
+          <td class="num" data-v="1">1</td>
+          <td>2026-04-13</td>
+          <td class="num" data-v="109">109</td>
+          <td><span class="badge sev-critical">Critical</span></td>
+        </tr>
+        <tr class="sev-critical">
+          <td>VM-0012</td>
+          <td class="num" data-v="1">1</td>
+          <td class="num" data-v="1">1</td>
+          <td>2026-07-22</td>
+          <td class="num" data-v="9">9</td>
+          <td><span class="badge sev-critical">Critical</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Triggered alarms</h2>
+    <p class="desc">Source: bare <code>govc alarms -json</code> at the inventory root — triggered alarms
+      propagate up the hierarchy, so the root call already returns every one.
+      <code>-ack</code> is never passed: acknowledging would clear the operator's own signal,
+      and the guard classifies it mutate-class for exactly that reason.
+      Thresholds: yellow = warning, red = critical.</p>
+    <table class="sortable">
+      <thead><tr><th>Status</th><th>Entity</th><th>Alarm</th><th>Acknowledged</th></tr></thead>
+      <tbody>
+        <tr class="sev-critical">
+          <td><span class="badge sev-critical">Red</span></td>
+          <td><code>Folder:group-d1</code> (inventory root)</td>
+          <td>Root user password expired.</td>
+          <td>no</td>
+        </tr>
+        <tr class="sev-warning">
+          <td><span class="badge sev-warning">Yellow</span></td>
+          <td><code>Folder:group-d1</code> (inventory root)</td>
+          <td>Root user password expires in 0 days.</td>
+          <td>no</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Checks not completed</h2>
+    <p class="desc">Three of the nine checks did not produce data. Each is reported as
+      <code>sev-info</code> — not <code>sev-ok</code>, which would hide that the analysis never
+      ran, and not <code>sev-warning</code>, which would blame the environment for a
+      collection gap.</p>
+    <table>
+      <thead><tr><th style="width:150px">Check</th><th>What was attempted</th><th>Why it did not complete</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>6 — Cluster HA / DRS</td>
+          <td><code>govc collect -json &lt;cluster&gt; configurationEx</code></td>
+          <td>Refused by the privacy wrapper: <code>configurationEx</code> is not on its
+              readable-property allowlist, which admits only non-free-text properties.
+              The check works against <code>govc</code> directly.</td>
+        </tr>
+        <tr>
+          <td>8 — Recent errors</td>
+          <td><code>govc events -n 1000 -json</code></td>
+          <td>Partially completed. Counts and the window are reported above; the per-type
+              breakdown is not, because event message text is free text and the wrapper
+              replaces it with <code>[redacted: free text]</code>. The
+              <code>-l</code> flag is refused for the same reason.</td>
+        </tr>
+        <tr>
+          <td>9 — Orphaned VMDKs</td>
+          <td><code>govc datastore.ls -R -l -json</code> per datastore</td>
+          <td>Not attempted. Opt-in by design — it walks every folder on every datastore.
+              Never run unattended.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <footer>
+    All data collected read-only with govc 0.53.0 against a production vCenter Server 7.x on
+    2026-07-31, through <code>wrapper/govc-safe</code>: every host, VM, datastore, datacenter
+    and cluster name above is a stable pseudonym, not a real identifier, and free-text fields
+    are redacted rather than tokenised. Run <code>govc-safe rehydrate &lt;file&gt;</code>
+    locally for a cleartext copy. The exact build number is generalised to
+    &ldquo;7.x&rdquo; by hand — the wrapper does not tokenise build numbers, and a precise
+    build identifies both the estate and its patch level. Three of nine checks did not
+    complete; see the section above. · Generated with the
+    <a href="https://github.com/vchaindz/claude-vsphere-skill">claude-vsphere-skill</a> (read-only data collection via govc).
+    Verify findings before acting on production systems.
+  </footer>
+
+</div>
+
+<script>
+/* click-to-sort for table.sortable — numeric via td.num / data-v, else string */
+document.querySelectorAll("table.sortable").forEach(function (tbl) {
+  tbl.querySelectorAll("thead th").forEach(function (th, i) {
+    th.addEventListener("click", function () {
+      var tb = tbl.tBodies[0], dir = th.dataset.dir === "asc" ? -1 : 1;
+      tbl.querySelectorAll("thead th").forEach(function (h) {
+        delete h.dataset.dir; var d = h.querySelector(".dir"); if (d) d.remove();
+      });
+      th.dataset.dir = dir === 1 ? "asc" : "desc";
+      th.insertAdjacentHTML("beforeend", ' <span class="dir">' + (dir === 1 ? "▲" : "▼") + "</span>");
+      var numeric = th.classList.contains("num");
+      Array.from(tb.rows).sort(function (a, b) {
+        var x = a.cells[i], y = b.cells[i];
+        if (numeric) {
+          var xv = parseFloat(x.dataset.v || x.textContent.replace(/[^\d.-]/g, "")) || 0;
+          var yv = parseFloat(y.dataset.v || y.textContent.replace(/[^\d.-]/g, "")) || 0;
+          return (xv - yv) * dir;
+        }
+        return x.textContent.trim().localeCompare(y.textContent.trim()) * dir;
+      }).forEach(function (r) { tb.appendChild(r); });
+    });
+  });
+});
+</script>
+</body>
+</html>
