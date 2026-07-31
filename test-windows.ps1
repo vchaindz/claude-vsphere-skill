@@ -119,6 +119,12 @@ Test-Cmd 'capacity: per-host capacity batch'      { $c = govc find / -type c | S
 Test-Cmd 'capacity: cluster.usage'                { $c = govc find / -type c | Select-Object -First 1; govc cluster.usage "$c" }
 Test-Cmd 'capacity: configured vCPU total'        { $vms = govc find / -type m; (govc vm.info -json @vms | ConvertFrom-Json).virtualMachines.config.hardware.numCPU }
 
+# --- reclamation (govc/references/rightsizing.md) ---
+Test-Cmd 'reclaim: powered-off VMs'               { govc find / -type m '-runtime.powerState' poweredOff }
+Test-Cmd 'reclaim: registered disk descriptors'   { $vms = govc find / -type m; (govc vm.info -json @vms | ConvertFrom-Json).virtualMachines.layoutEx.file | Where-Object { $_.type -eq 'diskDescriptor' } }
+# folderPath comes back in three different shapes - see rightsizing.md
+Test-Cmd 'reclaim: datastore.ls -R folderPath'    { $d = govc find / -type s | Select-Object -First 1 | Split-Path -Leaf; (govc datastore.ls -ds "$d" -R -l -json | ConvertFrom-Json)[0].folderPath }
+
 if ($fail -eq 0) { $color = 'Green' } else { $color = 'Yellow' }
 Write-Host ""
 Write-Host "=== $pass passed, $fail failed ===" -ForegroundColor $color

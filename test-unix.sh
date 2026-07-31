@@ -221,6 +221,38 @@ if [ -n "$firstcluster" ]; then
       "govc find / -type m | tr '\n' '\0' | xargs -0 govc vm.info -json | jq -e '[.virtualMachines[].config.hardware.numCPU] | add > 0' >/dev/null"
 fi
 
+# --- reclamation (govc/references/rightsizing.md) -------------------------------
+t "reclaim: powered-off VMs"       govc find / -type m -runtime.powerState poweredOff
+if command -v jq >/dev/null 2>&1; then
+    t "reclaim: registered disk descriptors" bash -c \
+      "govc find / -type m | tr '\n' '\0' | xargs -0 govc vm.info -json | jq -e '[.virtualMachines[].layoutEx.file[]? | select(.type == \"diskDescriptor\")] | length > 0' >/dev/null"
+    firstds=$(govc find / -type s | head -1 | xargs -n1 basename 2>/dev/null)
+    if [ -n "$firstds" ]; then
+        t "reclaim: folderPath carries the datastore prefix" bash -c \
+          "govc datastore.ls -ds '$firstds' -R -l -json | jq -e '.[0] | .folderPath | test(\"^\\\\[[^]]+\\\\]\")' >/dev/null"
+        # The orphan diff must find NOTHING here: every disk in the simulator
+        # belongs to a registered VM. It reported all of them as orphans until
+        # the folderPath normalisation was fixed - datastore.ls returns three
+        # different shapes ("[ds] dir/", "[ds]/dir", "[ds]") and concatenating
+        # any of them produces a path that matches no registered disk. This is
+        # the regression test for that.
+        t "reclaim: orphan diff has no false positives" bash -c '
+          govc find / -type m | tr "\n" "\0" | xargs -0 govc vm.info -json |
+            jq -r ".virtualMachines[].layoutEx.file[]? | select(.type == \"diskDescriptor\") | .name" |
+            sort -u > /tmp/govc-reg.$$
+          govc datastore.ls -ds "'"$firstds"'" -R -l -json |
+            jq -r ".[] | (.folderPath | capture(\"^\\\\[(?<ds>[^]]+)\\\\]\\\\s*/?(?<rest>.*)$\")) as \$f |
+              (\$f.rest | sub(\"/$\"; \"\")) as \$rest | .file[]? |
+              select(.path | test(\"\\\\.vmdk$\")) |
+              select(.path | test(\"-(flat|delta|ctk|sesparse|digest|rdmp?)\\\\.vmdk$\") | not) |
+              \"[\" + \$f.ds + \"] \" + (if \$rest == \"\" then \"\" else \$rest + \"/\" end) + .path" |
+            sort -u > /tmp/govc-disk.$$
+          n=$(comm -13 /tmp/govc-reg.$$ /tmp/govc-disk.$$ | wc -l)
+          rm -f /tmp/govc-reg.$$ /tmp/govc-disk.$$
+          [ "$n" -eq 0 ]'
+    fi
+fi
+
 # per-VM info + metrics on the first VM found
 firstvm=$(govc find / -type m | head -1)
 if [ -n "$firstvm" ]; then

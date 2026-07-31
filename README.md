@@ -194,16 +194,16 @@ To persist on Linux/macOS, add the `export` lines to `~/.zshrc` (macOS default s
 `vcsim`, the vCenter simulator from the govmomi project, answers nearly all govc calls with a simulated inventory. The included test scripts set everything up and validate the skill's command patterns:
 
 ```powershell
-# Windows: installs govc + vcsim, installs the skill, runs 30 smoke tests against the simulator
+# Windows: installs govc + vcsim, installs the skill, runs 37 smoke tests against the simulator
 powershell -ExecutionPolicy Bypass -File .\test-windows.ps1
 ```
 
 ```bash
-# Linux/macOS: installs govc + vcsim + the skill, runs 45 smoke tests against the simulator.
+# Linux/macOS: installs govc + vcsim + the skill, runs 53 smoke tests against the simulator.
 # No vCenter and no credentials needed — nothing real is touched.
 ./test-unix.sh --vcsim
 
-# Or against your real vCenter: ~39 READ-ONLY tests
+# Or against your real vCenter: ~47 READ-ONLY tests
 ./test-unix.sh
 # optional snapshot create/remove cycle on an explicitly named non-production VM:
 ./test-unix.sh --write-test my-test-vm
@@ -286,6 +286,7 @@ govc/
     ├── patching.md               # patch-day runbook: go/no-go, evacuate, verify
     ├── metrics.md                # perf history: intervals, retention, trends
     ├── capacity-planning.md      # overcommit ratios, N+1 headroom, growth
+    ├── rightsizing.md            # reclamation: powered-off, orphans, oversized, idle
     └── storage-network.md        # datastores, disks, vSwitch/DVS/portgroups
 ```
 
