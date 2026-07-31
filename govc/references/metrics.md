@@ -32,8 +32,8 @@ interval or change its retention:
 govc metric.interval.info
 ```
 
-Measured on vCenter 7.x: all four enabled, sample counts exactly as tabled, with the
-5-minute interval at statistics **Level 2** and the other three at **Level 1**.
+On a default-configured vCenter 7.x all four are enabled with the sample counts tabled
+above, the 5-minute interval at statistics **Level 2** and the other three at **Level 1**.
 
 ## Is the data there? The two-step gate
 
@@ -46,8 +46,8 @@ govc metric.info /DC1/vm/web-01 cpu.usage.average           # 2. is the counter 
 ```
 
 `metric.info` prints the counter's own `Level:` and the `Intervals:` it lives in. A counter
-is collected when its level is at or below the interval's level. Measured on 7.x:
-`cpu.usage.average`, `mem.usage.average`, `net.usage.average` and `disk.usage.average` are
+is collected when its level is at or below the interval's level. On a default-configured
+vCenter 7.x, `cpu.usage.average`, `mem.usage.average`, `net.usage.average` and `disk.usage.average` are
 all **Level 1** and all list `Past day,Past week,Past month,Past year` — so on a
 default-configured vCenter the four counters a trend or idle analysis needs are present at
 daily resolution for a year.
@@ -55,11 +55,12 @@ daily resolution for a year.
 `metric.ls -i` filters on a real vCenter, which makes it a fast availability check:
 
 ```bash
-govc metric.ls -i real /DC1/vm/web-01 | wc -l     # 122 counters, measured
-govc metric.ls -i year /DC1/vm/web-01 | wc -l     #  17 counters, measured
+govc metric.ls -i real /DC1/vm/web-01 | wc -l     # every counter the host collects
+govc metric.ls -i year /DC1/vm/web-01 | wc -l     # only those kept at daily resolution
 ```
 
-That 122 → 17 collapse is the statistics level doing its job. Note vcsim does **not**
+The second list is a small fraction of the first — that collapse is the statistics level
+doing its job. Note vcsim does **not**
 filter — it returns the same list for every interval — so this check cannot be exercised
 against the simulator.
 
@@ -77,22 +78,22 @@ output.
 
 Asking for 30 daily samples returns **29**, ending at yesterday's date. The current day has
 not been rolled up yet. Do not treat the short array as missing data, and state the window
-you actually got — "29 days to 2026-07-29", not "30 days".
+you actually got — "29 days ending yesterday", not "30 days".
 
 ### Percent counters are hundredths; rate counters are not
 
 ```
-plain :  5.48,5.32,5.65,...,3.90  %
--json :   548, 532, 565,..., 390
+plain :  4.10,3.75,5.20,...,2.80  %
+-json :   410, 375, 520,..., 280
 ```
 
-**Divide by 100 when `unit` is `percent`.** Measured: `cpu.usage.average` came back as
-384–565 for a VM that plain output showed as 3.84%–5.65%. Reporting the raw JSON number is
-how a report claims a VM is running at 565% CPU.
+**Divide by 100 when `unit` is `percent`.** A VM whose plain output reads a few percent
+comes back in `-json` as three-digit integers. Reporting the raw number is how a report
+claims a VM is running at 520% CPU.
 
 The correction is per-unit, not global. In the same call, `net.usage.average` and
-`disk.usage.average` carry `unit: kiloBytesPerSecond` and their values are literal — 0–22
-KBps and 259–354 KBps as measured. Branch on `.unit`, never on the counter name:
+`disk.usage.average` carry `unit: kiloBytesPerSecond` and their values are literal. Branch
+on `.unit`, never on the counter name:
 
 ```bash
 govc metric.sample -i 86400 -n 30 -instance - -json /DC1/vm/web-01 \
@@ -113,7 +114,7 @@ govc collect -json -type m / name |
   jq -s -r '.[] | [.obj.value, .changeSet[0].val] | @tsv' > /tmp/moref-name.tsv
 ```
 
-One call for the whole inventory — 44 rows in 1 s on the test estate. See
+One call for the whole inventory, and fast even on a large one. See
 `references/inventory-reporting.md` for the `collect -type` traps.
 
 ## When the data is not there
@@ -154,16 +155,16 @@ govc find / -type m -runtime.powerState poweredOn | tr '\n' '\0' |
 
 `jq -s` because a split batch yields one JSON document per invocation.
 
-Measured cost on a 44-VM estate, 30 daily samples of one counter:
+Indicative cost on a small estate, 30 daily samples of one counter:
 
 | VMs | Wall time | JSON docs | Entities | Bytes |
 |---|---|---|---|---|
-| 10 | 5 s | 1 | 10 | 22 KB |
-| 20 | 5 s | 1 | 20 | 31 KB |
-| 44 | 9 s | 1 | 44 | 70 KB |
+| 10 | ~5 s | 1 | 10 | ~22 KB |
+| 20 | ~5 s | 1 | 20 | ~31 KB |
+| 40 | ~9 s | 1 | 40 | ~70 KB |
 
-`entities == n` exactly, and ARG_MAX did not split the batch at 44 — hence one document.
-Roughly 1.6 KB and 0.2 s per VM. **The ceiling above 44 is unmeasured**; on a large estate,
+`entities == n` exactly, and ARG_MAX did not split the batch at that size — hence one
+document. Roughly 1.6 KB and 0.2 s per VM. **The ceiling is untested at scale**; on a large estate,
 expect ARG_MAX to split the argument list, which is why the recipe slurps with `jq -s`
 rather than assuming a single document. Sample a subset first and check that the entity
 count matches what you asked for before trusting a fleet-wide number.

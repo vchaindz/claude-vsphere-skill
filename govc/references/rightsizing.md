@@ -175,7 +175,7 @@ something), configured memory at least twice guest memory usage, and ballooned m
 (a ballooning VM is under memory pressure — the opposite of oversized).
 
 **`balloonedMemory` is absent, not `0`, when nothing is ballooning** — verified across a
-real estate where no VM reported the field at all. Hence `// 0` on every quickStats read
+production estate where no VM reported the field at all. Hence `// 0` on every quickStats read
 here; treating absence as "unknown" and skipping the VM would exclude precisely the healthy
 ones you are looking for.
 

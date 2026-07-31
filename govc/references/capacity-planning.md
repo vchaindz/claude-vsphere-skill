@@ -132,7 +132,8 @@ failure, and a mixed cluster is exactly where averaging hides the problem.
 so every headroom number is 0 and every ratio is undefined. That is a finding in itself,
 not a division error to code around: report "no failure capacity — a single host outage
 takes the whole cluster down", and say the headroom question cannot be answered until a
-second host exists. The example cluster above is exactly this case.
+second host exists. It is a common shape in branch offices and labs, and the report has to
+say so rather than printing a zero that looks like a calculation.
 
 ## Part 2 — how much more fits
 
@@ -224,9 +225,9 @@ Thresholds are in `references/report-template.md`; this file states none of its 
 ## Gotchas
 
 - **Thin provisioning is the overhang that bites.** `summary.uncommitted` on a datastore is
-  what thin disks would consume if every one inflated. Measured on a real datastore:
-  a datastore reporting roughly 500 GB free against nearly 1 TB uncommitted — fully
-  inflating its thin disks needs about twice the space that exists. That is a `sev-warning` on provisioned-vs-capacity even though the
+  what thin disks would consume if every one inflated. A datastore reporting roughly
+  500 GB free against nearly 1 TB uncommitted is not unusual — fully inflating its thin
+  disks would need about twice the space that exists. That is a `sev-warning` on provisioned-vs-capacity even though the
   used percentage looks fine, and it is invisible if you only report free space. vcsim does
   not expose `uncommitted` at all, so this can only be checked against a real vCenter.
 - **A powered-off VM still holds its storage and its promise.** It contributes to
