@@ -22,8 +22,9 @@ govc is the vSphere CLI built on govmomi (https://github.com/vmware/govmomi). It
    carry over to the next. So if the vars are missing, do not try to export them yourself
    and do not ask the user to paste a password into the chat. Tell the user to set them in
    their shell and restart Claude Code (`references/setup.md` has the syntax for bash/zsh,
-   PowerShell, and cmd). Check what's visible with `govc env GOVC_URL` — note that a bare
-   `govc env` prints `GOVC_PASSWORD` in cleartext, so never run it.
+   PowerShell, and cmd). Check what's visible with `govc env GOVC_URL` — always name the
+   variable you want, because `govc env` without one prints `GOVC_PASSWORD` in cleartext,
+   and so do `govc env -json`, `-dump` and `-x`. Never run those.
 
 2. **Know which shell you're in.** The command syntax below differs between POSIX shells
    and native PowerShell:
@@ -53,6 +54,11 @@ vSphere operations can take down production workloads. Follow these rules:
 - **Dry-run mentality.** Before a bulk operation, print the list of objects that will be affected (`govc find ...`) and show it to the user.
 - **Never echo credentials.** Don't print `GOVC_PASSWORD` or embed passwords in command lines that end up in logs; use environment variables.
 - **Snapshots are not backups.** If asked to "back up" via snapshot, do it, but note the distinction.
+
+If a command is denied with a `[govc-policy tier=...]` message, the operator has the
+deterministic policy hook installed. Do not rephrase or obfuscate the command to get
+around it — report what you wanted to run and why, and let the user decide whether to
+change the tier in their policy file.
 
 ## Output for reports
 
