@@ -99,6 +99,17 @@ Test-Cmd 'health: invalid VMs'                    { govc find / -type m '-runtim
 Test-Cmd 'health: consolidation needed'           { govc find / -type m '-runtime.consolidationNeeded' true }
 Test-Cmd 'health: Tools on powered-on VMs'        { $vms = govc find / -type m '-runtime.powerState' poweredOn; (govc vm.info -json @vms | ConvertFrom-Json).virtualMachines }
 
+# --- patch-day pre-flight (govc/references/patching.md) ---
+Test-Cmd 'patch: DRS enabled + mode'              { $c = govc find / -type c | Select-Object -First 1; (govc collect -json "$c" configurationEx | ConvertFrom-Json)[0].val.drsConfig }
+Test-Cmd 'patch: cluster summary'                 { $c = govc find / -type c | Select-Object -First 1; govc collect -json "$c" summary }
+# -cluster, not positional: override.info takes no operand
+Test-Cmd 'patch: per-VM DRS overrides'            { $c = govc find / -type c | Select-Object -First 1; govc cluster.override.info -json -cluster "$c" }
+# build level is READ-class, unlike host.esxcli - patch verification works at tier readonly
+Test-Cmd 'patch: host build (read-class)'         { $h = govc find / -type h | Select-Object -First 1; govc collect -s "$h" summary.config.product.build }
+Test-Cmd 'patch: VMs on this host'                { $h = govc find / -type h | Select-Object -First 1; govc collect -s -type m "$h" name }
+# maintenance round-trip - the host is POSITIONAL here, not -host
+Test-Cmd 'patch: maintenance enter/exit'          { $h = govc find / -type h | Select-Object -First 1; govc host.maintenance.enter -timeout 60 "$h"; govc host.maintenance.exit -timeout 60 "$h" }
+
 if ($fail -eq 0) { $color = 'Green' } else { $color = 'Yellow' }
 Write-Host ""
 Write-Host "=== $pass passed, $fail failed ===" -ForegroundColor $color

@@ -52,6 +52,11 @@ take no host positionally (`host.info`, `host.esxcli`, `host.portgroup.*`). Chec
 
 Safe sequence for one host: check cluster has capacity (`cluster.usage`), enter maintenance (this blocks until VMs are evacuated — with DRS in fullyAutomated it's automatic; otherwise migrate VMs manually with `vm.migrate`), do the work (or `host.shutdown esx01 [-r]` for reboot — confirm first), exit maintenance, verify with `host.info` and `alarms`.
 
+For an actual patch window — the capacity arithmetic, the go/no-go table, why an evacuation
+stalls, and how to prove afterwards that the patch really landed — follow
+`references/patching.md`. The commands above are the pieces; that file is the sequence, and
+a patch window is not a thing to assemble from pieces while the maintenance clock runs.
+
 ## esxcli passthrough
 
 Anything govc lacks natively can often be done via esxcli on the host:
