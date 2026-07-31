@@ -13,7 +13,7 @@
   datastore, datacenter and cluster name below is a stable pseudonym.
 
   It is here because the simulator cannot produce the thing an admin most needs
-  to see: a report with genuine findings, and genuine gaps. Three of the nine
+  to see: a report with genuine findings, and genuine gaps. Two of the nine
   checks did not complete, and how the report says so is the point.
 -->
 <style>
@@ -115,7 +115,7 @@
     <div class="kpi sev-ok"><div class="n">72%</div><div class="l">Fullest datastore</div></div>
     <div class="kpi sev-ok"><div class="n">1/1</div><div class="l">Hosts connected</div></div>
     <div class="kpi"><div class="n">44</div><div class="l">VMs (18 on, 26 off)</div></div>
-    <div class="kpi sev-warning"><div class="n">3/9</div><div class="l">Checks not completed</div></div>
+    <div class="kpi sev-warning"><div class="n">2/9</div><div class="l">Checks not completed</div></div>
   </div>
 
   <section id="findings">
@@ -175,11 +175,19 @@
         </tr>
         <tr>
           <td><span class="badge sev-info">Info</span></td>
-          <td>Cluster HA / DRS / admission control not collected</td>
-          <td>2 clusters</td>
-          <td>Re-run check 6 without the privacy wrapper, or from a host with direct
-              <code>govc</code> access. This is a collection gap, not an all-clear —
-              do not read the absence of a warning here as HA being enabled.</td>
+          <td>HA disabled on both clusters</td>
+          <td><code>CLUSTER-03</code> (1 host), <code>CLUSTER-04</code> (0 hosts)</td>
+          <td>No action from this threshold. HA disabled is a warning only on a cluster with
+              more than one host, and neither has one — there is nothing to fail over to, so
+              enabling HA would change nothing. Reported because the number an admin should
+              act on is the host count, not the HA flag.</td>
+        </tr>
+        <tr>
+          <td><span class="badge sev-info">Info</span></td>
+          <td>DRS disabled on one cluster</td>
+          <td><code>CLUSTER-04</code></td>
+          <td>Same reasoning — DRS has no second host to balance against. Noted rather than
+              flagged, per the threshold table.</td>
         </tr>
         <tr>
           <td><span class="badge sev-info">Info</span></td>
@@ -271,6 +279,34 @@
   </section>
 
   <section>
+    <h2>Cluster configuration</h2>
+    <p class="desc">Source: <code>govc collect -json &lt;cluster&gt; configurationEx</code>.
+      The whole struct, not a sub-path — vCenter answers <code>InvalidProperty</code> for
+      <code>configurationEx.dasConfig.enabled</code> and for <code>.dasConfig</code> alike,
+      so it is this or nothing. Thresholds fire only above one host, which is why nothing
+      here is a warning. <code>false</code> and &ldquo;not configured&rdquo; are shown
+      distinctly: jq's <code>//</code> operator fires on <code>false</code> as well as
+      <code>null</code>, which would collapse &ldquo;off&rdquo; into &ldquo;never set&rdquo;.</p>
+    <table class="sortable">
+      <thead><tr><th>Cluster</th><th class="num">Hosts</th><th>HA</th><th>Admission control</th><th>DRS</th><th>DRS mode</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>CLUSTER-03</td>
+          <td class="num" data-v="1">1</td>
+          <td>false</td><td>true</td><td>true</td><td>fullyAutomated</td>
+          <td><span class="badge sev-info">Info</span></td>
+        </tr>
+        <tr>
+          <td>CLUSTER-04</td>
+          <td class="num" data-v="0">0</td>
+          <td>false</td><td>true</td><td>false</td><td>fullyAutomated</td>
+          <td><span class="badge sev-info">Info</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
     <h2>Snapshots</h2>
     <p class="desc">Source: <code>govc vm.info -json</code> batched, walking
       <code>snapshot.rootSnapshotList[].childSnapshotList</code> recursively.
@@ -343,20 +379,13 @@
 
   <section>
     <h2>Checks not completed</h2>
-    <p class="desc">Three of the nine checks did not produce data. Each is reported as
+    <p class="desc">Two of the nine checks did not produce data. Each is reported as
       <code>sev-info</code> — not <code>sev-ok</code>, which would hide that the analysis never
       ran, and not <code>sev-warning</code>, which would blame the environment for a
-      collection gap.</p>
+      collection gap. Both limits below are the API's, not the wrapper's.</p>
     <table>
       <thead><tr><th style="width:150px">Check</th><th>What was attempted</th><th>Why it did not complete</th></tr></thead>
       <tbody>
-        <tr>
-          <td>6 — Cluster HA / DRS</td>
-          <td><code>govc collect -json &lt;cluster&gt; configurationEx</code></td>
-          <td>Refused by the privacy wrapper: <code>configurationEx</code> is not on its
-              readable-property allowlist, which admits only non-free-text properties.
-              The check works against <code>govc</code> directly.</td>
-        </tr>
         <tr>
           <td>8 — Recent errors</td>
           <td><code>govc events -n 1000 -json</code></td>
@@ -382,7 +411,7 @@
     are redacted rather than tokenised. Run <code>govc-safe rehydrate &lt;file&gt;</code>
     locally for a cleartext copy. The exact build number is generalised to
     &ldquo;7.x&rdquo; by hand — the wrapper does not tokenise build numbers, and a precise
-    build identifies both the estate and its patch level. Three of nine checks did not
+    build identifies both the estate and its patch level. Two of nine checks did not
     complete; see the section above. · Generated with the
     <a href="https://github.com/vchaindz/claude-vsphere-skill">claude-vsphere-skill</a> (read-only data collection via govc).
     Verify findings before acting on production systems.

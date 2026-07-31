@@ -260,7 +260,7 @@ environment:
 |---|---|
 | [`health-check-vcsim-2026-07-30.html`](examples/health-check-vcsim-2026-07-30.html) | normal output, real object names |
 | [`health-check-vcsim-tokens-2026-07-30.html`](examples/health-check-vcsim-tokens-2026-07-30.html) | the identical report with the [privacy wrapper](#optional-keeping-real-identifiers-away-from-the-model) active — every name, MoRef, UUID and address replaced by a stable pseudonym, and the vCenter endpoint withheld |
-| [`health-check-real-tokens-2026-07-31.html`](examples/health-check-real-tokens-2026-07-31.html) | a production estate, collected read-only through the wrapper — **findings that are actually findings**, and three of the nine checks not completed |
+| [`health-check-real-tokens-2026-07-31.html`](examples/health-check-real-tokens-2026-07-31.html) | a production estate, collected read-only through the wrapper — **findings that are actually findings**, and two of the nine checks not completed |
 
 Open the first two side by side: same findings, same numbers, same layout. The only
 difference is whether a real identifier ever left the host. With the wrapper active a report
@@ -268,12 +268,16 @@ is written in tokens, and `govc-safe rehydrate <file>` gives you a cleartext cop
 
 The third exists because the simulator cannot produce the two things an admin most needs to
 recognise. First, real findings: an expired appliance root password, and a snapshot that has
-been open for 1358 days. Second, and more useful, *real gaps* — one check refused by the
-wrapper's property allowlist, one that reached under three hours of events instead of the
-24 the check is named for, and one that is opt-in and was skipped. All three are reported as
-`sev-info` with the reason stated, which is the rule that matters: a check that did not run
-is never `sev-ok`. A report whose every line is green because nothing was collected is worse
-than no report.
+been open for 1358 days. Second, and more useful, *real gaps* — one check that reached under
+three hours of events instead of the 24 its name implies, and one that is opt-in and was
+skipped. Both are reported as `sev-info` with the reason stated, which is the rule that
+matters: a check that did not run is never `sev-ok`. A report whose every line is green
+because nothing was collected is worse than no report.
+
+It also shows a threshold correctly *not* firing. HA is disabled on both clusters, which the
+table calls a warning — above one host. Neither cluster has a second host, so there is
+nothing to fail over to and the finding is `sev-info` naming the host count instead. A report
+that warned here would be technically right and practically useless.
 
 The template itself is `govc/assets/report-template.html`; the rules for filling it —
 structure, severity vocabulary, thresholds, consultant mode — are in
