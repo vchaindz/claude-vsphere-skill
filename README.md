@@ -228,6 +228,7 @@ govc/
     ├── patching.md               # patch-day runbook: go/no-go, evacuate, verify
     ├── metrics.md                # perf history: intervals, retention, trends
     ├── capacity-planning.md      # overcommit ratios, N+1 headroom, growth
+    ├── rightsizing.md            # reclamation: powered-off, orphans, oversized, idle
     └── storage-network.md        # datastores, disks, vSwitch/DVS/portgroups
 ```
 

@@ -316,7 +316,8 @@ datastore; on a large estate it takes minutes and produces load on the storage l
 an admin did not agree to.
 
 The scanner itself lives in `references/rightsizing.md`, where the same diff is used for
-the reclamation report — it is written once there rather than twice. Follow the pointer if
+the reclamation report — it is written once there rather than twice. That file carries the
+path-joining trap that makes every file look orphaned if you get it wrong. Follow the pointer if
 the user says yes. Whatever it returns is a **candidate**, never a confirmed orphan, and
 this report never proposes deleting one.
 

@@ -170,6 +170,7 @@ Read the reference file matching the task — each contains commands, tested pat
 | Host patch day: pre-flight, evacuate, verify, roll back | `references/patching.md` |
 | Performance history: intervals, retention, trends, idle detection | `references/metrics.md` |
 | Capacity planning: overcommit ratios, N+1 headroom, growth | `references/capacity-planning.md` |
+| Right-sizing and reclamation: idle/oversized VMs, orphaned VMDKs | `references/rightsizing.md` |
 | Datastores, disks, networking (vSwitch/DVS/portgroups) | `references/storage-network.md` |
 | Environment health check: the fixed nine-check list, severities, baseline diff | `references/health-check.md` |
 | HTML report deliverables: template, severity rules, structure | `references/report-template.md` |
