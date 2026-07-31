@@ -16,6 +16,34 @@ And Claude picks the right govc commands, batches queries efficiently, parses th
 
 *(Real session against a real vCenter: asked about an outage "last night", Claude proved from rotated `vmware.log` files — beyond vCenter's event retention — that the VM had been down since December, and reconstructed the host outage that caused it. All read-only.)*
 
+## Three requests, end to end
+
+What the skill is actually for, in the words you would use.
+
+---
+
+**1. The morning report** — *"Run a health check on the vSphere environment and write it to `~/reports/` as HTML."*
+
+Nine fixed checks in a fixed order — hosts, alarms, datastore capacity, snapshots, VMware Tools, cluster HA/DRS, orphaned VMs, recent errors, and an opt-in orphaned-VMDK scan. Same checks every run, so today's report is comparable with last week's, and a baseline file next to it turns the second run into *"what changed since yesterday"*. You get a self-contained HTML file, severity-ranked, with a machine-readable summary line so a cron wrapper can tell success from silence.
+
+Read-only throughout: runs at tier `readonly` and works unattended. See [`docs/scheduled-reports.md`](docs/scheduled-reports.md).
+
+---
+
+**2. The awkward question** — *"web-01 was unreachable last night. What happened, and was it us?"*
+
+This is where an agent beats a dashboard. It pulls the VM's events and tasks, checks whether the host it sits on had a problem, and — when vCenter's event retention doesn't reach back far enough, which is usually — reads the rotated `vmware.log` files on the datastore, which go back much further. It will tell you the premise is wrong if it is; the screenshot above is a real session where the answer turned out to be *"it has been down since December, and here is the host outage that did it."*
+
+Read-only, so it runs at tier `readonly` against a read-only vCenter account.
+
+---
+
+**3. The change you have to get right** — *"Prepare esx02 for patching."*
+
+A pre-flight that ends in a go/no-go table before anything moves: can the cluster carry these VMs without this host, is DRS actually automated, which VMs cannot be evacuated, is anything mid-snapshot or mid-consolidation. Then evacuation and maintenance mode, one host at a time, with the build level recorded before and after so *"the patch landed"* is a fact rather than a hope.
+
+This one changes state, so it needs tier `standard` — and the reboot itself is destroy-class, refused there by design, and handed back to you with the host, the build transition and the reason spelled out.
+
 ## Safety first
 
 Instructions the skill enforces on every session:
@@ -27,6 +55,47 @@ Instructions the skill enforces on every session:
 - **Unattended runs keep the boundary** — a scheduled report run may pick default thresholds and write its own report file, but it may not issue a single non-read command; see [`docs/scheduled-reports.md`](docs/scheduled-reports.md).
 
 These are instructions to the model. For deterministic, code-level enforcement on top of them, add the policy hook below — and for a hard boundary, run govc with a least-privilege vCenter role: with a read-only account the skill physically cannot change anything. The three layers compose.
+
+## How the pieces fit
+
+The skill on its own is the top line. `guard/` and `wrapper/` are independent add-ons — take either, both, or neither. Nothing below the dashed line knows or cares which you chose.
+
+```
+DEFAULT — the skill only
+
+  you ──▶ Claude Code ─────────────────────────────▶ govc ──▶ vCenter / ESXi
+               │
+               └─ govc/SKILL.md safety rules      · real names in the transcript
+                  the model follows them          · anything the account can do
+
++ guard/ — enforcement the model cannot talk its way past
+
+  you ──▶ Claude Code ──▶ govc-policy.py ──────────▶ govc ──▶ vCenter / ESXi
+                               │    ▲
+                               │    └─ tier: readonly | standard | full,
+                               │       read from a file the agent cannot edit
+                               └─ ✗ deny ── destroy-class above your tier,
+                                            checked on every stage of a pipeline
+
++ wrapper/ — real identifiers never reach the model
+
+  you ──▶ Claude Code ──▶ govc-policy.py ──▶ govc-safe ──▶ govc ──▶ vCenter
+               ▲                                 │
+               │                                 └─ holds the credentials;
+               └── VM-0001  HOST-01  DS-01          substitutes real names
+                   the model only ever sees these   on the way back
+
+  you, locally:  govc-safe rehydrate report.html ──▶ the real names again
+```
+
+| Layer | Enforced by | Stops | Optional? |
+|---|---|---|---|
+| `govc/SKILL.md` rules | the model | careless changes, unannounced bulk operations | no — it *is* the skill |
+| `guard/` policy hook | code, before the command runs | destroy-class commands above your tier, obfuscated invocations | yes |
+| `wrapper/govc-safe` | code, in the data path | real names, addresses, MACs, UUIDs reaching the model | yes |
+| vCenter role | vSphere itself | anything the account cannot do, whatever else fails | yes, and the strongest |
+
+The last row is the one that holds when everything else is bypassed: a read-only service account means the skill *physically* cannot change anything. The guard and the wrapper are worth having on top because a read-only account still lets every VM name and IP address in your estate into a transcript, and because most people need to make changes eventually.
 
 ## Deterministic security layer (optional)
 
