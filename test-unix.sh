@@ -203,6 +203,24 @@ if [ -n "$firsthost" ]; then
     t "patch: VMs on this host"        govc collect -s -type m "$firsthost" name
 fi
 
+# --- capacity planning (govc/references/capacity-planning.md) -------------------
+# All read-class. Units differ per field - totalMemory is bytes while
+# effectiveMemory, in the same struct, is MB - so the assertion is that the
+# fields are reachable, never that a computed ratio has a particular value.
+if [ -n "$firstcluster" ]; then
+    t "capacity: cluster summary fields" bash -c \
+      "govc collect -json '$firstcluster' summary | jq -e '.[0].val | has(\"totalCpu\") and has(\"effectiveMemory\")' >/dev/null"
+    t "capacity: per-host capacity batch" bash -c \
+      "govc collect -json -type h '$firstcluster' name summary.hardware.numCpuCores summary.hardware.cpuMhz summary.hardware.memorySize | jq -s -e 'length > 0' >/dev/null"
+    t "capacity: cluster.usage"        govc cluster.usage "$firstcluster"
+    # NOTE: sum(cores x cpuMhz) == summary.totalCpu holds on a real vCenter
+    # (verified 32 x 2495 = 79840) but NOT under vcsim, whose synthetic numbers
+    # disagree with themselves - so that invariant is a real-vCenter sanity
+    # check documented in the reference file, deliberately not asserted here.
+    t "capacity: configured vCPU total" bash -c \
+      "govc find / -type m | tr '\n' '\0' | xargs -0 govc vm.info -json | jq -e '[.virtualMachines[].config.hardware.numCPU] | add > 0' >/dev/null"
+fi
+
 # per-VM info + metrics on the first VM found
 firstvm=$(govc find / -type m | head -1)
 if [ -n "$firstvm" ]; then

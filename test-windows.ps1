@@ -110,6 +110,15 @@ Test-Cmd 'patch: VMs on this host'                { $h = govc find / -type h | S
 # maintenance round-trip - the host is POSITIONAL here, not -host
 Test-Cmd 'patch: maintenance enter/exit'          { $h = govc find / -type h | Select-Object -First 1; govc host.maintenance.enter -timeout 60 "$h"; govc host.maintenance.exit -timeout 60 "$h" }
 
+# --- capacity planning (govc/references/capacity-planning.md) ---
+# totalMemory is bytes while effectiveMemory, in the same struct, is MB.
+# sum(cores x cpuMhz) == totalCpu holds on a real vCenter but NOT under vcsim,
+# so that invariant is documented in the reference file, not asserted here.
+Test-Cmd 'capacity: cluster summary fields'       { $c = govc find / -type c | Select-Object -First 1; (govc collect -json "$c" summary | ConvertFrom-Json)[0].val.totalCpu }
+Test-Cmd 'capacity: per-host capacity batch'      { $c = govc find / -type c | Select-Object -First 1; govc collect -json -type h "$c" name summary.hardware.numCpuCores summary.hardware.cpuMhz }
+Test-Cmd 'capacity: cluster.usage'                { $c = govc find / -type c | Select-Object -First 1; govc cluster.usage "$c" }
+Test-Cmd 'capacity: configured vCPU total'        { $vms = govc find / -type m; (govc vm.info -json @vms | ConvertFrom-Json).virtualMachines.config.hardware.numCPU }
+
 if ($fail -eq 0) { $color = 'Green' } else { $color = 'Yellow' }
 Write-Host ""
 Write-Host "=== $pass passed, $fail failed ===" -ForegroundColor $color
