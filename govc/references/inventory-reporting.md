@@ -178,6 +178,12 @@ govc metric.info vm/my-vm cpu.usage.average              # units, rollup, interv
 
 Use `-json` for parsing; instance `""` is the aggregate. Real-time samples are 20-second intervals; historical intervals are controlled by vCenter (`metric.interval.info`).
 
+Retention gating, daily rollups, batch sampling and trend arithmetic are in
+`references/metrics.md`. The commands above answer "what is this VM doing right now";
+anything covering a window longer than an hour needs that file — in particular `-i day` is
+the past-day window at 5-minute resolution, **not** a daily rollup, and percent counters
+come back from `-json` as hundredths.
+
 ## Events, tasks, alarms, logs
 
 ```bash

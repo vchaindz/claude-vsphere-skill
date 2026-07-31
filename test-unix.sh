@@ -209,6 +209,27 @@ if [ -n "$firstvm" ]; then
     t "info: vm.info -json"        govc vm.info -json "$firstvm"
     t "collect: powerState"        govc collect -s "$firstvm" summary.runtime.powerState
     t "metrics: metric.ls"         govc metric.ls "$firstvm"
+    # --- performance history (govc/references/metrics.md) ---
+    # `-i day` is the past-DAY window at 5-min resolution; daily rollups are
+    # `-i year` / `-i 86400`. vcsim returns synthetic data at every interval,
+    # so these assert the command surface, never a value.
+    t "metrics: interval.info"     govc metric.interval.info
+    t "metrics: metric.info"       govc metric.info "$firstvm" cpu.usage.average
+    t "metrics: daily rollup"      govc metric.sample -i 86400 -n 5 -instance - "$firstvm" cpu.usage.average
+    if command -v jq >/dev/null 2>&1; then
+        # A VM with no daily history - powered off, or created this week -
+        # returns an empty sample set and exit 0. Asserting .sample[0] would
+        # then report a failure against a perfectly healthy vCenter, so sample
+        # a POWERED-ON VM and assert the shape only when a series came back.
+        metricvm=$(govc find / -type m -runtime.powerState poweredOn | head -1)
+        [ -n "$metricvm" ] || metricvm="$firstvm"
+        # -json identifies entities by MoRef only, never by name
+        t "metrics: -json shape when data exists" bash -c \
+          "govc metric.sample -i 86400 -n 5 -instance - -json '$metricvm' cpu.usage.average |
+             jq -e 'if (.sample | length) == 0 then true
+                    else (.sample[0].entity.value != null)
+                         and (.sample[0].value[0] | has(\"unit\")) end' >/dev/null"
+    fi
 fi
 
 # the portable batch pattern the skill teaches - must work on BSD/macOS xargs too

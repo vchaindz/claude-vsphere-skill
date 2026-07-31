@@ -86,6 +86,10 @@ VERB_FLAGS = {
     "metric.ls":              _J | {"-i", "-l", "-dc"},
     "metric.sample":          _J | {"-n", "-i", "-t", "-instance", "-dc"},
     "metric.info":            _J | {"-dc"},
+    # the retention gate in references/metrics.md: without this the first step
+    # of any trend or idle-VM analysis is refused before credentials load.
+    # Emits interval ids and sample counts only — no inventory identifiers.
+    "metric.interval.info":   _J,
     "events":                 _J | {"-n", "-type", "-dc"},             # never -f
     "tasks":                  _J | {"-n", "-dc"},                      # never -f
     "alarms":                 _J | {"-n", "-dc"},
