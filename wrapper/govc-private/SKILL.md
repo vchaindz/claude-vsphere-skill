@@ -127,9 +127,21 @@ Write: `vm.power`, `vm.migrate`, `snapshot.create`, `snapshot.remove`,
 Anything else is refused with an explanation. **A refusal is not a bug and not a
 permissions problem — do not work around it.** `guest.*`, `host.esxcli`, `logs`,
 `datastore.tail`, `permissions.ls`, `sso.*` and `about.cert` are excluded
-because their output cannot be redacted safely. The flags `-trace`, `-verbose`,
-`-debug`, `-e`, `-l`, `-u`, `-k` and `-f` are refused for the same reason. If a
-question genuinely needs one of these, say so and let the user run it
+because their output cannot be redacted safely.
+
+Flags fall into two groups, and the difference matters because the same letter
+means different things on different verbs:
+
+- **Refused on every verb**: `-trace`, `-verbose`, `-debug`, `-dump`, `-xml`,
+  `-password`, `-u`, `-k`, `-cert`, `-key`, `-e`. These either write raw SOAP
+  past the redactor or put credentials on a command line.
+- **Refused only where they would leak or never return**: `-l` on `events`,
+  `tasks` and `alarms`, whose long forms print the free-text message; `-f` on
+  `events` and `tasks`, which follows a stream forever. The same letters are
+  fine elsewhere and you should use them — `ls -l`, `find -l`, `about -l`,
+  `snapshot.tree -f` (full path, not follow), `collect -s`, `metric.sample -i`.
+
+If a question genuinely needs a refused flag, say so and let the user run it
 themselves.
 
 ## Health check
@@ -158,7 +170,7 @@ govc-safe find / -type c | while IFS= read -r c; do
   jq -r '.[0].val.dasConfig.enabled'; done | grep -c false                # 6 clusters, HA off
 for st in orphaned inaccessible invalid; do                               # 7 all three states
   govc-safe find / -type m -runtime.connectionState "$st" | wc -l; done
-govc-safe events -n 500 -l -json | jq -s '[.[] | select(.category == "error")] | length'  # 8
+govc-safe events -n 1000 -json | jq -s '[.[] | select(.category == "error")] | length'    # 8
 # 9 (orphaned-VMDK scan) is slow and opt-in — ask first, never in an unattended run
 ```
 
@@ -166,6 +178,17 @@ govc-safe events -n 500 -l -json | jq -s '[.[] | select(.category == "error")] |
 every cluster has HA on. Ask for `configurationEx` whole: the nested form
 `collect -s "$c" configurationEx.dasConfig.enabled` fails on a real vCenter with
 `ServerFaultCode: InvalidProperty`.
+
+Two things about check 8 that a count alone will misrepresent:
+
+- **`-n` is the only window there is.** `govc events` has no time filter, and
+  above 1000 it returns nothing at all rather than erroring. On a busy vCenter
+  1000 events can span two or three hours, not a day. Report the window you
+  actually reached — take `min` and `max` of `.createdTime` and say so — never
+  "errors in the last 24 hours".
+- **Message text is redacted**, so a per-type breakdown is not available here.
+  Counts and the window are what the wrapper can honestly give you, which is
+  also why `-l` is refused for this verb.
 
 Two rules override the checklist in token space:
 
