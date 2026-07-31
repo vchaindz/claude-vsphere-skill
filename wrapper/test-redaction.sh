@@ -144,6 +144,16 @@ run alarms
 run snapshot.tree -vm VM-0001
 run snapshot.tree -vm VM-0001 -f -s -D
 run snapshot.tree -vm VM-0001 -f -s -D -i
+# File listings, refused outright until the bare-filename gap was closed. This
+# is what the orphaned-VMDK scan needs, and its output is scanned for leaks
+# along with everything else below.
+run datastore.ls -ds DS-01
+run datastore.ls -ds DS-01 -R -l -json
+# `tasks` is the only verb with a real time window, and -b/-e were refused by a
+# global rule that read -e as vm.info's extraConfig flag.
+run tasks -n 5 -b 24h -e 0s
+run device.ls -vm VM-0001
+run role.ls
 
 echo "[..] exercising the policy boundary (must all be refused)"
 # NOTE: `rehydrate` is deliberately NOT refused here. It is a legitimate operator
@@ -170,6 +180,12 @@ refuse collect -json -type m / config.annotation
 refuse collect -json -type m / name config.annotation
 refuse collect -json -bogus m / name
 refuse notaverb
+# A flag must not be a way back to something the verb list already refused.
+refuse vm.ip -esxcli VM-0001            # reaches the host through esxcli
+refuse host.storage.info -rescan -host HOST-01   # acts rather than reads
+refuse vm.info -e VM-0001               # extraConfig, per-verb reason now
+refuse fields.ls                        # still out: definition names unhandled
+refuse datastore.download -ds DS-01 x y
 # Flags govc does not define for these verbs -- the object is positional. They used
 # to sit in the allowlist, so policy permitted them and govc then rejected them with
 # "flag provided but not defined", which reads like a wrapper bug.
@@ -342,6 +358,47 @@ check(gs.TOKEN_RE.fullmatch(got["entity"]["value"] or ""),
 # "[redacted] (red)" is not something an administrator can act on or diff.
 check(got["name"]["name"].startswith("ALARM-"),
       "an alarm label was not tokenised: %r" % got["name"]["name"])
+
+# A datastore listing. `file[].path` holds BARE filenames -- no `[DS-01] `
+# prefix, no directory in front -- which neither path regex matches, so an
+# orphaned folder's files went through verbatim. That is exactly the set the
+# orphaned-VMDK scan looks for, and it was the reason the verb was refused.
+listing = [{"folderPath": "[LocalDS_0] DC0_H0_VM0/",
+            "file": [{"path": "DC0_H0_VM0.vmx", "fileSize": 3000},
+                     {"path": "vmware.log", "fileSize": 100}]},
+           {"folderPath": "[LocalDS_0] acme-payroll-retired/",
+            "file": [{"path": "acme-payroll-retired.vmdk", "fileSize": 500}]},
+           # a folder name with SPACES: DS_PATH_RE captures [^\s]+ and so
+           # stopped at the first word, shipping the rest in the clear
+           {"folderPath": "[LocalDS_0] ACME Corp SQL/",
+            "file": [{"path": "ACME Corp SQL.vmdk", "fileSize": 900}]}]
+got = json.loads(gs.redact_output(json.dumps(listing), tmap))
+flat = json.dumps(got)
+check("acme-payroll-retired" not in flat, "an orphaned folder name leaked")
+check("ACME" not in flat, "a spaced folder name leaked: %s" % flat)
+check("vmware.log" in flat, "a role-describing stem was tokenised away")
+check(".vmdk" in flat and ".vmx" in flat, "file extensions were destroyed")
+# A folder that IS a live VM must resolve to THAT VM's token, not to a fresh
+# VMDIR -- the orphan scan is a set difference against vm.info output, and two
+# tokens for one folder made 91% of an estate look orphaned.
+vmtok = tmap.lookup("_name", "DC0_H0_VM0")
+if vmtok:
+    check(vmtok in got[0]["folderPath"],
+          "a live VM's folder did not resolve to its own token: %r"
+          % got[0]["folderPath"])
+
+# An AlarmExpression comparison: the value means whatever attributeName says.
+comparisons = [{"name": {"name": "x", "expression": {"expression": [
+    {"comparisons": [{"attributeName": "newStatus", "operator": "equals",
+                      "value": "yellow"},
+                     {"attributeName": "userName", "operator": "equals",
+                      "value": "ACME\\\\jdoe"}]}]}}}]
+gc2 = json.loads(gs.redact_output(json.dumps(comparisons), tmap))
+comps = gc2[0]["name"]["expression"]["expression"][0]["comparisons"]
+check(comps[0]["value"] == "yellow",
+      "an enum comparison value was blanked: %r" % comps[0]["value"])
+check("jdoe" not in json.dumps(comps[1]),
+      "a principal comparison value survived: %r" % comps[1]["value"])
 
 operator_alarm = [{"overallStatus": "yellow",
                    "name": {"name": "ACME-Corp payroll SLA breach",

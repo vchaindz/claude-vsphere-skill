@@ -59,7 +59,16 @@ HARD_REFUSED_FLAGS = {
     "-k": "TLS behaviour is fixed by the wrapper",
     "-cert": "TLS material is fixed by the wrapper",
     "-key": "TLS material is fixed by the wrapper",
-    "-e": "prints extraConfig/guestinfo, which holds cloud-init secrets",
+}
+
+# Flags refused on ONE verb, with the reason that verb makes true. `-e` used to
+# sit in the global list above as "prints extraConfig/guestinfo" -- correct for
+# `vm.info` and wrong everywhere else. On `tasks` it is the end of the task
+# history window, and `tasks` is the only verb with a real time window at all,
+# so the global rule refused the very thing the health check needs. Same fault
+# as blanket-refusing `-l`: a flag's meaning belongs to its verb.
+VERB_REFUSED_FLAGS = {
+    ("vm.info", "-e"): "prints extraConfig/guestinfo, which holds cloud-init secrets",
 }
 
 # Per-verb flag allowlist. Anything not listed here is refused.
@@ -79,6 +88,13 @@ VERB_FLAGS = {
     "vm.info":                _J | {"-r", "-t", "-g", "-dc"},          # never -e; VM is positional
     "host.info":              _J | {"-host", "-dc"},
     "datastore.info":         _J | {"-dc"},                            # PATH is positional
+    # File listings. Refused outright until the `file[].path` gap below was
+    # closed -- the reason given was "expose real VM folder names", and it was
+    # accurate. Now every component is tokenised, so the orphaned-VMDK scan in
+    # references/rightsizing.md works here: it needs sizes and the set
+    # difference, never the names.
+    "datastore.ls":           _J | {"-dc", "-ds", "-R", "-l", "-p", "-a", "-H"},
+    "disk.ls":                _J | {"-dc", "-ds", "-l", "-L", "-a", "-T", "-c", "-t"},
     "datacenter.info":        _J | {"-dc"},
     "cluster.usage":          _J | {"-dc"},
     "pool.info":              _J | {"-p", "-dc"},
@@ -91,8 +107,37 @@ VERB_FLAGS = {
     # Emits interval ids and sample counts only — no inventory identifiers.
     "metric.interval.info":   _J,
     "events":                 _J | {"-n", "-type", "-dc"},             # never -f
-    "tasks":                  _J | {"-n", "-dc"},                      # never -f
+    "tasks":                  _J | {"-n", "-dc", "-b", "-e", "-s", "-r"},   # never -f
     "alarms":                 _J | {"-n", "-dc"},
+    # Read-class verbs the skill's own reference files tell you to run. Refused
+    # by omission rather than by decision until now: govc has 105 read-class
+    # verbs and this list admitted twelve, so `govc-private` could not run
+    # commands the plain skill instructs it to. Everything here returns
+    # structured output the tokeniser already covers -- object names, addresses,
+    # MACs, datastore paths.
+    #
+    # `vm.ip -esxcli` is deliberately absent: it reaches the host through
+    # esxcli, which is refused as a verb, and a flag must not be a way back to
+    # something the verb list already said no to. So are `host.storage.info`'s
+    # -rescan and -refresh, which act rather than read.
+    "device.ls":              _J | {"-vm", "-dc", "-boot"},
+    "device.info":            _J | {"-vm", "-dc"},
+    "vm.ip":                  _J | {"-dc", "-a", "-n", "-v4", "-wait"},
+    "cluster.rule.ls":        _J | {"-cluster", "-dc", "-l", "-name"},
+    "cluster.group.ls":       _J | {"-cluster", "-dc", "-l"},
+    "cluster.override.info":  _J | {"-cluster", "-dc"},
+    "datastore.cluster.info": _J | {"-dc"},
+    "datastore.disk.info":    _J | {"-dc", "-ds", "-c", "-d", "-p", "-uuid"},
+    "dvs.portgroup.info":     _J | {"-dc", "-pg", "-active", "-count"},
+    "host.date.info":         _J | {"-host", "-dc"},
+    "host.option.ls":         _J | {"-host", "-dc"},
+    "host.portgroup.info":    _J | {"-host", "-dc"},
+    "host.service.ls":        _J | {"-host", "-dc"},
+    "host.storage.info":      _J | {"-host", "-dc", "-t"},
+    "host.vnic.info":         _J | {"-host", "-dc"},
+    "host.vswitch.info":      _J | {"-host", "-dc"},
+    "logs.ls":                _J | {"-host", "-dc"},
+    "role.ls":                _J | {"-dc", "-i"},
     "vm.power":               {"-on", "-off", "-s", "-r", "-reset", "-suspend", "-force", "-dc"},
     "vm.migrate":             {"-host", "-ds", "-pool", "-folder", "-priority", "-dc"},
     "snapshot.create":        {"-vm", "-d", "-m", "-q", "-dc"},
@@ -136,7 +181,27 @@ FLAG_TAKES_VALUE = {
     "metric.sample":          {"-n", "-i", "-instance", "-dc"},
     "metric.info":            {"-dc"},
     "events":                 {"-n", "-type", "-dc"},
-    "tasks":                  {"-n", "-dc"},
+    "tasks":                  {"-n", "-dc", "-b", "-e", "-s"},
+    "datastore.ls":           {"-dc", "-ds"},
+    "disk.ls":                {"-dc", "-ds", "-c", "-t"},
+    "device.ls":              {"-vm", "-dc"},
+    "device.info":            {"-vm", "-dc"},
+    "vm.ip":                  {"-dc", "-n", "-wait"},
+    "cluster.rule.ls":        {"-cluster", "-dc", "-name"},
+    "cluster.group.ls":       {"-cluster", "-dc"},
+    "cluster.override.info":  {"-cluster", "-dc"},
+    "datastore.cluster.info": {"-dc"},
+    "datastore.disk.info":    {"-dc", "-ds"},
+    "dvs.portgroup.info":     {"-dc", "-pg"},
+    "host.date.info":         {"-host", "-dc"},
+    "host.option.ls":         {"-host", "-dc"},
+    "host.portgroup.info":    {"-host", "-dc"},
+    "host.service.ls":        {"-host", "-dc"},
+    "host.storage.info":      {"-host", "-dc", "-t"},
+    "host.vnic.info":         {"-host", "-dc"},
+    "host.vswitch.info":      {"-host", "-dc"},
+    "logs.ls":                {"-host", "-dc"},
+    "role.ls":                {"-dc"},
     "alarms":                 {"-n", "-dc"},
     "vm.power":               {"-dc"},
     "vm.migrate":             {"-host", "-ds", "-pool", "-folder", "-priority", "-dc"},
@@ -207,10 +272,18 @@ REFUSED_VERBS = {
     "logs": "raw vCenter logs contain usernames, session IDs and client IPs",
     "datastore.tail": "vmware.log contains hostnames, MACs and guest hostnames",
     "datastore.download": "arbitrary file content",
-    "datastore.ls": "datastore file listings expose real VM folder names",
     "permissions.ls": "principal names are PII",
     "role.usage": "principal names are PII",
-    "fields.ls": "custom attribute values routinely contain owner names",
+    # The old reason here -- "custom attribute values routinely contain owner
+    # names" -- described `customValue`, a different structure that is already
+    # dropped as free text. The real obstacle is narrower and still unsolved:
+    # product field names are dotted (`InstantClone.Maintenance`), so the FQDN
+    # sweep tokenises them to FQDN-nnn, while admin-created names are free text
+    # that would pass straight through. Needs a rule of its own; until then the
+    # verb stays out rather than ship half-redacted and half-unreadable.
+    "fields.ls": "field definition names need handling this wrapper does not "
+                 "have yet: product names tokenise as FQDNs, admin-chosen ones "
+                 "would pass through",
     "env": "prints GOVC_PASSWORD in cleartext",
     "about.cert": "certificate subject/SAN reveal the real vCenter FQDN",
     "import.spec": "OVF properties include password-typed fields",
@@ -276,6 +349,30 @@ TYPE_PREFIX = {
 TOKEN_RE = re.compile(r"\b(?:DC|VM|HOST|CLUSTER|DS|DSCLUSTER|NET|PG|DVS|POOL|VAPP|"
                       r"FOLDER|SNAP|VMDIR|IP|IP6|MAC|UUID|USER|FQDN|MOREF|OBJ|"
                       r"ALARM)-\d+\b")
+
+# A HostDatastoreBrowserSearchResults always carries `folderPath`, and its
+# `file[]` entries hold BARE filenames -- "acme-payroll-old.vmdk", with no
+# `[DS-01] ` prefix and no directory in front. Neither DS_PATH_RE nor
+# VM_FILE_RE matches that shape, so before this the folderPath tokenised
+# correctly to `[DS-01] VMDIR-01/` while every filename beside it went through
+# verbatim. A current VM's files were saved by the name alternation; an
+# ORPHANED folder's were not, which is precisely the set the scan exists to
+# find. That gap is why the verb used to be refused outright.
+# In an AlarmExpression comparison the `value` is whatever `attributeName`
+# names, and blanking it wholesale was wrong in both directions on real data:
+#
+#   componentName equals Root Password   <- a vSphere health component
+#   newStatus     equals yellow          <- an enum
+#   userName      equals root            <- a principal, and genuinely PII
+#
+# The first two carry no information about the environment and were the whole
+# meaning of the row; the third has to go. The sibling says which, so the rule
+# is structural like the rest rather than a guess at the string.
+COMPARISON_PRINCIPAL_ATTRS = {"username", "user", "principal", "owner",
+                              "loginname", "account"}
+
+FILE_LISTING_KEY = "folderPath"
+FILE_LISTING_PATHS = {"path", "friendlypath", "friendlyname"}
 
 # An AlarmInfo always carries an `expression`; nothing else govc emits does.
 # That is what marks the adjacent `name` as an alarm LABEL, which is operator
@@ -643,6 +740,41 @@ def redact_text(text, tmap):
     return text
 
 
+def path_segment(s, tmap):
+    """Tokenise one path component, keeping the extension and role-stems.
+
+    Module level rather than nested because the file-listing verbs need it on
+    values the text passes below never sees: `datastore.ls -json` returns bare
+    filenames in `file[].path`, with no `[DS-01] ` prefix and no `dir/` in
+    front, so neither DS_PATH_RE nor VM_FILE_RE matches them.
+    """
+    if not s or TOKEN_RE.fullmatch(s):
+        return s
+    # A folder that IS a live object's name has to resolve to THAT object's
+    # token, never to a fresh VMDIR. The text path gets this for free because
+    # the name alternation runs before tokenise_paths; the structural callers
+    # below arrive here first, so it has to run here too. Without it the same
+    # folder came back as VM-0013 through vm.info and VMDIR-196 through
+    # datastore.ls, and the orphan diff -- which is a set difference between
+    # exactly those two -- reported 91% of the estate as orphaned.
+    pattern, lookup = build_name_pattern(tmap)
+    if pattern:
+        s = pattern.sub(lambda m: lookup[m.group(0)], s)
+        if TOKEN_RE.fullmatch(s):
+            return s
+    stem, dot, ext = s.rpartition(".")
+    if not dot:
+        stem, ext = s, ""
+    if TOKEN_RE.fullmatch(stem) or SAFE_PATH_STEM.match(stem):
+        return s
+    return tmap.token_for("VMDIR", stem) + (("." + ext) if ext else "")
+
+
+def path_value(p, tmap):
+    """Tokenise every component of a slash-separated path."""
+    return "/".join(path_segment(x, tmap) for x in p.split("/"))
+
+
 def tokenise_paths(text, tmap):
     """Tokenise datastore path components.
 
@@ -656,21 +788,11 @@ def tokenise_paths(text, tmap):
     it are rewritten. File extensions are preserved so the file's role is still
     readable, as are role-describing stems like "vmware.log" and "disk1.vmdk".
     """
-    def seg(s):
-        if not s or TOKEN_RE.fullmatch(s):
-            return s
-        stem, dot, ext = s.rpartition(".")
-        if not dot:
-            stem, ext = s, ""
-        if TOKEN_RE.fullmatch(stem) or SAFE_PATH_STEM.match(stem):
-            return s
-        return tmap.token_for("VMDIR", stem) + (("." + ext) if ext else "")
-
-    def path(p):
-        return "/".join(seg(x) for x in p.split("/"))
-
-    text = DS_PATH_RE.sub(lambda m: m.group(1) + path(m.group(2)), text)
-    text = VM_FILE_RE.sub(lambda m: seg(m.group(1)) + "/" + seg(m.group(2)), text)
+    text = DS_PATH_RE.sub(
+        lambda m: m.group(1) + path_value(m.group(2), tmap), text)
+    text = VM_FILE_RE.sub(
+        lambda m: path_segment(m.group(1), tmap) + "/"
+        + path_segment(m.group(2), tmap), text)
     return text
 
 
@@ -696,6 +818,38 @@ def moref_token(obj, tmap):
     return tmap.token_for(TYPE_PREFIX.get(typ, "MOREF"), val)
 
 
+def redact_folder_path(s, tmap):
+    """`[datastore] some folder/` -> `[DS-01] VMDIR-07/`.
+
+    Structural rather than via DS_PATH_RE, because that pattern captures
+    `[^\\s]+` and so stops at the first space: a folder called "ACME Corp SQL"
+    had only "ACME" replaced and shipped " Corp SQL" in the clear. Splitting on
+    `/` alone keeps a spaced name as one component, which then tokenises whole.
+    """
+    m = re.match(r"^(\[[^\]]*\]\s*)(.*)$", s)
+    if not m:
+        return redact_text(s, tmap)
+    rest = m.group(2)
+    trail = "/" if rest.endswith("/") else ""
+    body = path_value(rest.rstrip("/"), tmap) if rest.strip("/") else ""
+    return redact_text(m.group(1), tmap) + body + trail
+
+
+def redact_file_entry(entry, tmap):
+    """One `file[]` entry of a datastore listing: the filename is tokenised
+    component-wise, everything else is redacted normally. Sizes and timestamps
+    are what make the listing useful and say nothing about the workload."""
+    if not isinstance(entry, dict):
+        return redact_json(entry, tmap)
+    out = {}
+    for k, v in entry.items():
+        if k.lower() in FILE_LISTING_PATHS and isinstance(v, str) and v.strip():
+            out[k] = path_value(v, tmap)
+        else:
+            out[k] = redact_json(v, tmap)
+    return out
+
+
 def redact_json(obj, tmap):
     """Redact a parsed JSON tree: values are rewritten, keys are not.
 
@@ -716,10 +870,19 @@ def redact_json(obj, tmap):
         schema_name = named and any(k in obj for k in SCHEMA_NAME_SIBLINGS)
         user_name = named and USER_NAMED_SIBLING in obj
         alarm_label = named and ALARM_MARKER in obj
+        listing = FILE_LISTING_KEY in obj
         out = {}
         for k, v in obj.items():
             if moref is not None and k == "value":
                 out[k] = moref
+            elif listing and k == "file" and isinstance(v, list):
+                out[k] = [redact_file_entry(e, tmap) for e in v]
+            elif listing and k == FILE_LISTING_KEY and isinstance(v, str):
+                out[k] = redact_folder_path(v, tmap)
+            elif k == "value" and isinstance(obj.get("attributeName"), str):
+                out[k] = ("[redacted: free text]"
+                          if obj["attributeName"].lower() in COMPARISON_PRINCIPAL_ATTRS
+                          else redact_json(v, tmap))
             elif k == "name" and schema_name:
                 out[k] = v
             elif k == "name" and user_name:
@@ -853,6 +1016,9 @@ def check_policy(args):
         if flag in HARD_REFUSED_FLAGS:
             raise Refused("flag '%s' is not permitted: %s"
                           % (flag, HARD_REFUSED_FLAGS[flag]))
+        if (verb, flag) in VERB_REFUSED_FLAGS:
+            raise Refused("flag '%s' is not permitted for '%s': %s"
+                          % (flag, verb, VERB_REFUSED_FLAGS[(verb, flag)]))
         is_filter = verb == "find" and flag in FIND_FILTERS
         if flag in allowed or is_filter:
             # `-flag=value` carries its own operand; `-flag value` takes the next

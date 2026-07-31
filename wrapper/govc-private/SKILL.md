@@ -124,10 +124,18 @@ absent on exactly the operator-created alarms whose names were worth hiding.
 
 ## Available verbs
 
-Read: `about`, `ls`, `find`, `tree`, `collect`, `vm.info`, `host.info`,
-`datastore.info`, `datacenter.info`, `cluster.usage`, `pool.info`,
-`snapshot.tree`, `metric.ls`, `metric.sample`, `metric.info`,
+Read: `about`, `ls`, `find`, `tree`, `collect`, `vm.info`, `vm.ip`, `host.info`,
+`datastore.info`, `datastore.ls`, `datastore.cluster.info`,
+`datastore.disk.info`, `disk.ls`, `datacenter.info`, `cluster.usage`,
+`cluster.rule.ls`, `cluster.group.ls`, `cluster.override.info`, `pool.info`,
+`folder`-level `ls`, `device.ls`, `device.info`, `dvs.portgroup.info`,
+`host.date.info`, `host.option.ls`, `host.portgroup.info`, `host.service.ls`,
+`host.storage.info`, `host.vnic.info`, `host.vswitch.info`, `logs.ls`,
+`role.ls`, `snapshot.tree`, `metric.ls`, `metric.sample`, `metric.info`,
 `metric.interval.info`, `events`, `tasks`, `alarms`.
+
+`datastore.ls -R` walks every folder on every datastore and puts load on the
+storage layer. Ask before running it, and never in a scheduled job.
 
 Write: `vm.power`, `vm.migrate`, `snapshot.create`, `snapshot.remove`,
 `host.maintenance.enter`, `host.maintenance.exit`.
@@ -151,6 +159,18 @@ means different things on different verbs:
 
 If a question genuinely needs a refused flag, say so and let the user run it
 themselves.
+
+**One capability the plain skill has and this one does not: log forensics.**
+Reading a VM's `vmware.log` off the datastore reaches back much further than
+vCenter's event retention, and it is how the plain skill answers "what happened
+to this VM last week" once `events` runs out. It needs `datastore.tail` or
+`datastore.download`, and both are refused here: a log is unbounded free text
+and can carry guest hostnames, in-guest paths and usernames that appear nowhere
+in the inventory, so there is nothing to tokenise them against.
+
+Say this plainly when a question needs it — do not quietly answer a smaller
+question instead. The operator can run the log commands themselves; what they
+need from you is to know that is the step.
 
 ## Health check
 
