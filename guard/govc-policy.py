@@ -232,6 +232,94 @@ CALL_RE = re.compile(
     r"govc(?:-safe)?(?:\.exe)?"
     r"(?![\w.\\/-])")
 
+# Characters that end one simple command and begin the next, so a govc
+# immediately after one is the command word of a fresh command: pipes, list
+# separators, newlines, and the openers of a subshell or command substitution
+# (`$(`, backtick, `(`, `{`).
+CMD_OPENERS = "|&;\n(){}`"
+
+# `FOO=bar govc vm.destroy` — an assignment prefix does not make govc an
+# operand, so these are skipped when looking for the command word.
+ASSIGN_RE = re.compile(r"^[A-Za-z_]\w*=")
+
+# Commands that take their operands as DATA rather than executing them. The
+# wrapper's own file is called govc-safe, so `cat wrapper/govc-safe`,
+# `cp wrapper/govc-safe ~/.local/bin/` and `grep -n x wrapper/govc-safe` all
+# parse as invocations of the wrapper — with the NEXT token landing in
+# subcommand position. `cp wrapper/govc-safe "$HOME/.local/bin/govc-safe"` read
+# as govc with the subcommand `$HOME/...`, an unresolved variable in verb
+# position, which is destroy-class. Installing the wrapper was refused at every
+# tier, and so was reading it.
+#
+# The same fault hit prose: `echo "### govc creds"` and `grep -n govc file` were
+# denied because a word in a message is not a command either.
+#
+# This list is the ONLY thing that suppresses a match. Everything else — an
+# unrecognised command word, a shell keyword, `xargs`, `sudo`, `timeout`, a
+# flag, an interpreter — still classifies, so a novel exec wrapper fails closed
+# rather than opening a hole.
+#
+# The test for membership is not "does it read files" but "can it EXECUTE an
+# operand". Deliberately absent for that reason: python/perl/ruby/node (`-c`
+# runs code), awk (`system()`), find (`-exec`), tar and rsync (both can spawn a
+# helper), every shell in SHELL_RUNNERS — and sed, which looks like the most
+# obvious member of this list and is not one: GNU sed's `e` command and the
+# `s///e` flag both run their result through a shell.
+FILE_CONSUMERS = {
+    "cat", "cp", "mv", "ln", "ls", "install", "chmod", "chown", "chgrp",
+    "stat", "file", "realpath", "readlink", "dirname", "basename",
+    "head", "tail", "less", "more", "wc", "nl", "xxd", "strings",
+    "grep", "egrep", "fgrep", "rg", "cut", "sort", "uniq", "tee",
+    "diff", "cmp", "touch", "mkdir", "rmdir", "rm",
+    "echo", "printf", "git", "shellcheck", "shfmt",
+    "md5sum", "sha1sum", "sha256sum", "cksum",
+}
+
+# How far back command_word looks for the start of a simple command. A bound is
+# needed because this text includes heredocs and whole script bodies, and an
+# unbounded scan per match makes a large file quadratic. Running off the end
+# returns None, which classifies — the safe direction.
+MAX_LOOKBACK = 4096
+
+
+def command_word(text, pos):
+    """The command word governing position `pos`, or None if `pos` IS one.
+
+    Walks back to the nearest separator or subshell opener, then reads forward
+    past assignment prefixes and flags to the word actually being run.
+    """
+    floor = max(0, pos - MAX_LOOKBACK)
+    i = pos - 1
+    while i >= floor and text[i] in " \t":
+        i -= 1
+    if i < floor or text[i] in CMD_OPENERS:
+        return None                     # start of text, or right after | && $( `
+    j = i
+    while j >= floor and text[j] not in CMD_OPENERS:
+        j -= 1
+    if j < floor and floor > 0:
+        return None                     # ran out of lookback: classify
+    head = text[j + 1:pos]
+    try:
+        toks = shlex.split(head)
+    except ValueError:
+        toks = head.split()
+    for t in toks:
+        if ASSIGN_RE.match(t) or t.startswith("-"):
+            continue
+        return os.path.basename(t).lower()
+    return None
+
+
+def reads_stdin_shell(cmd):
+    """True if any segment runs a shell, which may execute text this scan can
+    only see as an operand: `echo 'govc vm.destroy' | sh`. Suppression is
+    switched off entirely for such a command rather than reasoned about."""
+    for toks in segments(cmd):
+        if os.path.basename(toks[0]).lower() in SHELL_RUNNERS:
+            return True
+    return False
+
 
 def flag_names(args):
     """The flag tokens as Go's flag package would see them.
@@ -391,7 +479,16 @@ def read_scripts(cmd, cwd=None, depth=3):
     while queue and len(out) < MAX_SCRIPTS and depth > 0:
         nxt = []
         for path in queue:
-            rp = os.path.realpath(path)
+            # ValueError, not just OSError: a path can carry an embedded null
+            # once this has re-scanned a file that was never text. `/usr/bin/env
+            # govc vm.destroy` reached here because script_paths yields anything
+            # with a slash in it, so the hook read the ELF binary, scanned the
+            # garbage for more scripts, and crashed on realpath. A PreToolUse
+            # hook that raises does not deny — it fails OPEN.
+            try:
+                rp = os.path.realpath(path)
+            except (OSError, ValueError):
+                continue
             if rp in seen or len(out) >= MAX_SCRIPTS:
                 continue
             seen.add(rp)
@@ -402,6 +499,8 @@ def read_scripts(cmd, cwd=None, depth=3):
                     raw = f.read(MAX_SCRIPT_BYTES)
             except OSError:
                 continue
+            if b"\0" in raw[:4096]:
+                continue          # a binary, not a script to read through
             if b"govc" not in raw:
                 # still follow it: it may exec another script that does
                 text = raw.decode("utf-8", "replace")
@@ -414,8 +513,18 @@ def read_scripts(cmd, cwd=None, depth=3):
 
 
 def extract_invocations(cmd):
-    """Yield (subcommand, args) for each govc/govc-safe call in the text."""
+    """Yield (subcommand, args) for each govc/govc-safe call in the text.
+
+    A match only counts when govc is in COMMAND position. The binary and the
+    wrapper share their names with files in this repo, so the same text is both
+    a program to run and a path to read — and treating every mention as a call
+    denied `cat wrapper/govc-safe` at every tier. See FILE_CONSUMERS for which
+    way each case falls, and why the default is still to classify.
+    """
+    suppress = not reads_stdin_shell(cmd)
     for m in CALL_RE.finditer(cmd):
+        if suppress and command_word(cmd, m.start()) in FILE_CONSUMERS:
+            continue
         tail = cmd[m.end():]
         # cut at the next shell separator so one invocation's args don't
         # bleed into the next
@@ -425,7 +534,13 @@ def extract_invocations(cmd):
         try:
             toks = shlex.split(tail)
         except ValueError:
-            toks = tail.split()
+            # The cut landed inside a quoted string, so shlex sees an unbalanced
+            # quote. Splitting on whitespace leaves the quote glued to the
+            # token: `tar --use-compress-program='govc vm.destroy' x` gave the
+            # subcommand `vm.destroy'`, which matches nothing in DESTROY and so
+            # graded as mutate — allowed at standard, where the real verb is
+            # denied. Strip the quotes the shell would have consumed.
+            toks = [t.strip("'\"") for t in tail.split()]
         if delim == "`" and "`" in rest.split("\n", 1)[0]:
             # The cut landed on a command substitution inside this
             # invocation's own arguments — `govc alarms `echo -ack` /DC1`.
@@ -571,7 +686,20 @@ def main():
     cmd = (event.get("tool_input") or {}).get("command", "") or ""
 
     tier, extra_deny, allow, note = load_policy()
-    verdict = decide(cmd, tier, extra_deny, allow, note, event.get("cwd"))
+    try:
+        verdict = decide(cmd, tier, extra_deny, allow, note, event.get("cwd"))
+    except Exception as exc:
+        # An exception is not a verdict, and Claude Code does not read it as
+        # one: a hook that raises is a hook that did not deny, so a bug here
+        # would silently become an allow. Deny instead — but only when the
+        # command actually mentions govc, so a defect in this file cannot
+        # brick every unrelated command in the session.
+        if not CALL_RE.search(cmd):
+            sys.exit(0)
+        out("deny", f"[govc-policy tier={tier}] the policy hook failed while "
+                    f"classifying this command ({type(exc).__name__}), so it "
+                    "cannot be shown to be safe. Refusing rather than "
+                    "assuming. Please report the command that triggered this.")
     if verdict:
         out(*verdict)
     sys.exit(0)
@@ -688,10 +816,19 @@ def selftest():
         ("govc --help",                              "readonly", None),
         ("govc version   # is govc installed?",      "readonly", None),
         ("govc vm.info x # govc vm.destroy y",       "standard", None),
-        # a quoted govc still counts — it may be `bash -c "govc ..."` — so it
-        # is classified, not skipped; a harmless mention costs one tier
+        # A quoted govc used to be classified wherever it appeared, on the
+        # grounds that it might be `bash -c "govc ..."`. That reasoning was
+        # sound but the net was cast too wide: it also denied `echo "### govc
+        # creds"` at readonly, because `creds` parsed as an unknown subcommand.
+        # The concern it was protecting against is now carried precisely — a
+        # shell anywhere in the pipeline switches suppression off entirely — so
+        # the interpreter cases below still deny while the mention does not.
         ("govc vm.info x && echo 'govc done'",       "standard", None),
-        ("govc vm.info x && echo 'govc done'",       "readonly", "deny"),
+        ("govc vm.info x && echo 'govc done'",       "readonly", None),
+        ("bash -c \"govc vm.destroy x\"",            "standard", "deny"),
+        ("sh -c 'govc vm.destroy x'",                "standard", "deny"),
+        ("echo 'govc vm.destroy x' | bash -s",       "standard", "deny"),
+        ("eval 'govc vm.destroy x'",                 "standard", "deny"),
         ("echo '# not a comment' && govc vm.destroy y",
                                                      "standard", "deny"),
         # `govc env` prints GOVC_PASSWORD whatever flags it is given
@@ -726,6 +863,89 @@ def selftest():
         ("govc/../govc vm.destroy x",                "standard", "deny"),
         ("./govc vm.destroy x",                      "standard", "deny"),
         ("/opt/bin/govc vm.destroy x",               "standard", "deny"),
+
+        # --- command position -------------------------------------------
+        # The wrapper's file is NAMED govc-safe, so a path to it is not a call.
+        # These were denied at every tier, including `full`: the token after the
+        # path landed in subcommand position, and `$HOME/...` there is an
+        # unresolved verb, which is destroy-class.
+        ("cp wrapper/govc-safe $HOME/.local/bin/govc-safe",
+                                                     "readonly", None),
+        ("cp wrapper/govc-safe ~/.local/bin/govc-safe && chmod 0755 "
+         "~/.local/bin/govc-safe",                   "readonly", None),
+        ("install -m 0755 wrapper/govc-safe ~/.local/bin/",
+                                                     "readonly", None),
+        ("cat wrapper/govc-safe",                    "readonly", None),
+        ("head -40 wrapper/govc-safe",               "readonly", None),
+        ("wc -l wrapper/govc-safe",                  "readonly", None),
+        ("grep -n selftest wrapper/govc-safe",       "readonly", None),
+        ("rm ~/.local/bin/govc-safe",                "readonly", None),
+        ("git show HEAD:wrapper/govc-safe",          "readonly", None),
+        # a word in a message is not a command either
+        ('echo "### govc creds available?"',         "readonly", None),
+        ("grep -rn govc docs/",                      "readonly", None),
+        ("printf 'see govc vm.destroy\\n'",          "readonly", None),
+
+        # ...and the cases that must STILL classify. The default is to treat a
+        # match as a call, so only FILE_CONSUMERS suppresses; everything below
+        # relies on that rather than on an exec-wrapper list being complete.
+        ("govc vm.destroy x",                        "standard", "deny"),
+        ("xargs -0 govc vm.destroy",                 "standard", "deny"),
+        ("printf x | xargs -0 govc vm.destroy",      "standard", "deny"),
+        ("sudo govc vm.destroy x",                   "standard", "deny"),
+        ("timeout 60 govc vm.destroy x",             "standard", "deny"),
+        ("env GOVC_URL=x govc vm.destroy y",         "standard", "deny"),
+        ("GOVC_URL=x govc vm.destroy y",             "standard", "deny"),
+        ("nohup govc vm.destroy x",                  "standard", "deny"),
+        ("echo $(govc vm.destroy x)",                "standard", "deny"),
+        ("echo `govc vm.destroy x`",                 "standard", "deny"),
+        ("(govc vm.destroy x)",                      "standard", "deny"),
+        ("true && govc vm.destroy x",                "standard", "deny"),
+        ("true; govc vm.destroy x",                  "standard", "deny"),
+        ("cat f | govc vm.destroy x",                "standard", "deny"),
+        ("for v in a b; do govc vm.destroy $v; done", "standard", "deny"),
+        ("if govc vm.destroy x; then true; fi",      "standard", "deny"),
+        ("python3 -c \"__import__('os').system('govc vm.destroy x')\"",
+                                                     "standard", "deny"),
+        ("awk 'BEGIN{system(\"govc vm.destroy x\")}'", "standard", "deny"),
+        ("find . -exec govc vm.destroy {} ;",        "standard", "deny"),
+        # a shell reading stdin can execute what only LOOKS like an operand,
+        # so suppression is switched off for the whole command
+        ("echo 'govc vm.destroy x' | sh",            "standard", "deny"),
+        ("echo 'govc vm.destroy x' | bash",          "standard", "deny"),
+        # the suppressed forms stay suppressed when no shell is in the pipeline
+        ("cat wrapper/govc-safe | wc -l",            "readonly", None),
+        # more exec wrappers, none of them enumerated anywhere: they deny
+        # because an unrecognised command word classifies, not because a list
+        # names them. That is the property worth testing.
+        ("command govc vm.destroy x",                "standard", "deny"),
+        ("exec govc vm.destroy x",                   "standard", "deny"),
+        ("nice -n 5 govc vm.destroy x",              "standard", "deny"),
+        ("stdbuf -o0 govc vm.destroy x",             "standard", "deny"),
+        ("watch govc vm.destroy x",                  "standard", "deny"),
+        ("while true; do govc vm.destroy x; done",   "standard", "deny"),
+        ("until govc vm.destroy x; do :; done",      "standard", "deny"),
+        ("case a in a) govc vm.destroy x;; esac",    "standard", "deny"),
+        ("perl -e 'system(\"govc vm.destroy x\")'",  "standard", "deny"),
+
+        # --- three faults found while verifying the above ------------------
+        # All three predate the command-position change and all three let a
+        # destroy-class command through.
+        #
+        # script_paths yields anything containing a slash, so the hook read
+        # /usr/bin/env as a script, re-scanned the ELF for more scripts, and
+        # crashed realpath on an embedded null. The invocation was classified
+        # correctly — it never got that far. A PreToolUse hook that raises is a
+        # hook that did not deny.
+        ("/usr/bin/env govc vm.destroy x",           "standard", "deny"),
+        ("/bin/sh -c 'govc vm.destroy x'",           "standard", "deny"),
+        # The tail is cut mid-quote, shlex throws, and the fallback split left
+        # the quote glued on: `vm.destroy'` is in no table, so it graded mutate
+        # and ran at standard.
+        ("tar -cf - --use-compress-program='govc vm.destroy' x",
+                                                     "standard", "deny"),
+        ("rsync -e 'govc vm.destroy' a b",           "standard", "deny"),
+        ("ssh h 'govc vm.destroy x'",                "standard", "deny"),
     ]
     failed = 0
     for cmd, tier, expected in cases:
