@@ -226,6 +226,8 @@ govc/
     ├── snapshots.md              # create, audit, revert, cleanup workflow
     ├── host-cluster.md           # maintenance mode, DRS/HA rules, pools, esxcli
     ├── patching.md               # patch-day runbook: go/no-go, evacuate, verify
+    ├── metrics.md                # perf history: intervals, retention, trends
+    ├── capacity-planning.md      # overcommit ratios, N+1 headroom, growth
     └── storage-network.md        # datastores, disks, vSwitch/DVS/portgroups
 ```
 

@@ -86,6 +86,29 @@ in the section `.desc`:
 | HA admission control disabled while HA is on | always | — |
 | Cluster DRS disabled, or `defaultVmBehavior` `manual`, on a cluster with more than one host | note in `.desc` | — |
 | Error-category events in the window | > 20, or ≥ 3 naming the same object | corroborating a critical from another check |
+| Datastore provisioned vs capacity (thin overhang) | > 100% | > 150% |
+| vCPU : physical core (N+1 basis, cores not threads) | > 4:1 | > 6:1 |
+| Allocated vRAM vs effective memory (N+1 basis) | > 100% | > 120% |
+| Cluster headroom for the stated VM profile (N+1) | ≤ 3 VMs | 0 VMs |
+| HA `currentFailoverLevel` | 1 | 0 |
+| Projected host load after evacuating one host | ≥ 80% | ≥ 90% |
+| Host build differs from the rest of its cluster | any | — |
+| Powered-off VM age | > 30 days | > 90 days |
+| Oversized VM (configured ≥ 2× peak demand, 7+ days uptime, no ballooning) | any | — |
+| Idle VM (30 d: mean CPU < 2%, p95 < 5%, net and disk ≈ 0) | any | — |
+| Orphaned VMDK candidate | any | — |
+| Statistics retention insufficient for the requested trend | — | — (report as `sev-info`, "not collected") |
+
+Two rules that go with the table:
+
+**N+1 is the basis for every ratio and headroom threshold.** A cluster that only passes with
+all hosts up has no headroom; report the current-state number as context and raise the
+finding against the N+1 number.
+
+**A degraded check is `sev-info`**, not `sev-ok` and not `sev-warning`. "Growth trend not
+collected — retention too short" is information the admin can act on. Dressing it up as a
+warning about the environment misattributes the problem; dressing it down as ok hides that a
+requested analysis did not happen.
 
 ## Consultant mode
 
