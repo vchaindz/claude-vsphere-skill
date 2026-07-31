@@ -274,7 +274,23 @@ TYPE_PREFIX = {
 }
 
 TOKEN_RE = re.compile(r"\b(?:DC|VM|HOST|CLUSTER|DS|DSCLUSTER|NET|PG|DVS|POOL|VAPP|"
-                      r"FOLDER|SNAP|VMDIR|IP|IP6|MAC|UUID|USER|FQDN|MOREF|OBJ)-\d+\b")
+                      r"FOLDER|SNAP|VMDIR|IP|IP6|MAC|UUID|USER|FQDN|MOREF|OBJ|"
+                      r"ALARM)-\d+\b")
+
+# An AlarmInfo always carries an `expression`; nothing else govc emits does.
+# That is what marks the adjacent `name` as an alarm LABEL, which is operator
+# text -- "ACME-Corp SLA breach" -- and was passing through verbatim while the
+# `description` beside it was being dropped.
+#
+# Tokenised rather than blanked, which is the whole point of this tool: an alarm
+# label is short, repeats across triggers, and is what a report identifies the
+# alarm BY. Blanking it would leave "[redacted] (red)", which tells an
+# administrator nothing and cannot be diffed between runs -- and there is no
+# other identifier to fall back on, because `systemName` is absent on exactly
+# the operator-created alarms whose labels are the concern. A stable ALARM-nn
+# keeps the count, the correlation and the baseline diff, and
+# `govc-safe rehydrate` gives the operator the real name back locally.
+ALARM_MARKER = "expression"
 
 # A snapshot managed object reference, e.g. "snapshot-12052".
 SNAP_MOREF_RE = re.compile(r"^snapshot-\d+$")
@@ -699,6 +715,7 @@ def redact_json(obj, tmap):
         named = isinstance(obj.get("name"), str) and obj["name"].strip()
         schema_name = named and any(k in obj for k in SCHEMA_NAME_SIBLINGS)
         user_name = named and USER_NAMED_SIBLING in obj
+        alarm_label = named and ALARM_MARKER in obj
         out = {}
         for k, v in obj.items():
             if moref is not None and k == "value":
@@ -707,6 +724,12 @@ def redact_json(obj, tmap):
                 out[k] = v
             elif k == "name" and user_name:
                 out[k] = "[redacted: free text]"
+            elif k == "name" and alarm_label:
+                # An alarm named after an inventory object should resolve to
+                # THAT object's token, so correlation survives; anything else
+                # gets its own stable ALARM-nn.
+                sub = redact_text(v, tmap)
+                out[k] = sub if TOKEN_RE.fullmatch(sub) else tmap.token_for("ALARM", v)
             elif k.lower() in SCHEMA_VALUE_KEYS and isinstance(v, str):
                 out[k] = v
             elif k.lower() in FREE_TEXT_KEYS and isinstance(v, str) and v.strip():

@@ -79,7 +79,7 @@ shape_fail=0
 # The wrapper's token grammar, mirroring TOKEN_RE in govc-safe. Spelled out
 # rather than [A-Z]+ so the invariants below do not fire on real strings that
 # merely look token-shaped, such as a snapshot named "INC-4471x".
-TOK='(DC|VM|HOST|CLUSTER|DS|DSCLUSTER|NET|PG|DVS|POOL|VAPP|FOLDER|SNAP|VMDIR|IP|IP6|MAC|UUID|USER|FQDN|MOREF|OBJ)'
+TOK='(DC|VM|HOST|CLUSTER|DS|DSCLUSTER|NET|PG|DVS|POOL|VAPP|FOLDER|SNAP|VMDIR|IP|IP6|MAC|UUID|USER|FQDN|MOREF|OBJ|ALARM)'
 
 # Must SUCCEED. A non-zero exit means the wrapper is over-refusing, which would
 # otherwise look like a pass: no output, therefore no leaks.
@@ -336,6 +336,36 @@ check(got["name"]["description"] == "[redacted: free text]",
       "an alarm description survived: %r" % got["name"]["description"])
 check(gs.TOKEN_RE.fullmatch(got["entity"]["value"] or ""),
       "an alarm's entity MoRef was not tokenised: %r" % got["entity"]["value"])
+# The LABEL is operator text -- "ACME-Corp SLA breach" -- and used to pass
+# through verbatim while the description beside it was dropped. Tokenised
+# rather than blanked: it is what a report identifies the alarm by, and
+# "[redacted] (red)" is not something an administrator can act on or diff.
+check(got["name"]["name"].startswith("ALARM-"),
+      "an alarm label was not tokenised: %r" % got["name"]["name"])
+
+operator_alarm = [{"overallStatus": "yellow",
+                   "name": {"name": "ACME-Corp payroll SLA breach",
+                            "description": "page the on-call",
+                            "expression": {}, "setting": {}, "enabled": True}}]
+first = json.loads(gs.redact_output(json.dumps(operator_alarm), tmap))[0]
+again = json.loads(gs.redact_output(json.dumps(operator_alarm), tmap))[0]
+check("ACME" not in json.dumps(first), "an operator alarm label leaked")
+check(first["name"]["name"].startswith("ALARM-"),
+      "an operator alarm label was not tokenised: %r" % first["name"]["name"])
+# Stability is the reason for a token over a blank: a baseline diff has to see
+# the same alarm as the same alarm on the next run.
+check(first["name"]["name"] == again["name"]["name"],
+      "an alarm token was not stable across runs")
+check(first["name"]["description"] == "[redacted: free text]",
+      "an operator alarm description survived")
+# An alarm named after an inventory object resolves to THAT object's token, so
+# the correlation axis is not broken by minting a second name for one thing.
+host_alarm = [{"name": {"name": "DC0_H0", "expression": {}}}]
+gh = json.loads(gs.redact_output(json.dumps(host_alarm), tmap))[0]
+check(gh["name"]["name"] == tmap.lookup("_name", "DC0_H0") or
+      gs.TOKEN_RE.fullmatch(gh["name"]["name"] or ""),
+      "an alarm named after a host did not resolve to its token: %r"
+      % gh["name"]["name"])
 
 for m in bad:
     print("[DMG]  %s" % m)

@@ -38,8 +38,16 @@ govc-safe vm.power -off VM-0017
 
 Token prefixes: `DC` datacenter, `VM` virtual machine, `HOST` ESXi host,
 `CLUSTER`, `DS` datastore, `NET`/`PG` network/portgroup, `DVS`, `POOL` resource
-pool, `FOLDER`, plus `IP`, `MAC`, `UUID`, `USER`, `FQDN` for values found in
-output.
+pool, `FOLDER`, `SNAP` snapshot, `ALARM` alarm, plus `IP`, `MAC`, `UUID`,
+`USER`, `FQDN` for values found in output.
+
+**Alarm labels are tokens, alarm identifiers are not.** An alarm can be named
+anything an admin typed, including after a customer, so its label comes back as
+`ALARM-01`. vCenter's own identifier for the alarms it ships —
+`alarm.HostMemoryUsageAlarm` in `.name.systemName` — is a product constant and
+passes through. Report the token: `ALARM-02 (red)` counts, correlates and diffs
+like any other. Do not reach for `.systemName` when the label is a token; it is
+absent on exactly the operator-created alarms whose names were worth hiding.
 
 ## Rules
 

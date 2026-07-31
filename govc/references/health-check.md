@@ -108,10 +108,16 @@ live 7.x vCenter, where the triggered appliance alarms carried `.name.name` and 
 and a baseline key built on `.systemName` alone silently collapses every operator-created
 alarm into one.
 
-Through `wrapper/govc-safe` the two fields also behave differently: `.name.name` is
-operator text and is redacted, while `.systemName` is a vSphere constant and passes
-through. That is the reverse of what you might expect, and it is why the wrapper's own
-health check leads with the status and the entity rather than the label.
+Through `wrapper/govc-safe` the two fields behave in opposite ways, and not the ways you
+would guess. `.name.name` is operator text — an alarm can be called anything, including
+after a customer — so it comes back as a stable `ALARM-01`. `.systemName` is a vSphere
+constant and passes through unchanged. So under the wrapper the *identifier* is readable
+and the *label* is not, which is the reverse of the plain case.
+
+Report it as the token. `ALARM-01 (red)` still counts, still correlates, and still diffs
+against yesterday's baseline; the operator runs `govc-safe rehydrate` locally to see which
+alarm it was. Do not fall back to `.systemName` for display under the wrapper — it is
+absent on precisely the operator-created alarms whose labels were worth hiding.
 
 Use the **bare form**. Triggered alarms propagate up the inventory hierarchy and `PATH`
 already defaults to `/`, so one call returns every triggered alarm in the environment —
