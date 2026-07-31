@@ -102,6 +102,50 @@ VERB_FLAGS = {
 }
 ALLOWED_VERBS = set(VERB_FLAGS)
 
+# Flags that consume the NEXT argument. govc is built on Go's flag package,
+# where a boolean flag never takes a separate operand and a string flag always
+# does -- and the same spelling differs between verbs: `-i` is a boolean on
+# `find` and `snapshot.tree` (print the MoRef / the snapshot id) but an interval
+# id on `metric.sample`, and `-t` is a boolean on `vm.info` but an object type
+# on `ls`. So this is per-verb; a global set would be wrong in both directions.
+#
+# Not tracking arity was not a cosmetic gap. The operand landed in `positional`,
+# which two checks read: `collect -type h /` was refused with "property 'h' is
+# not readable through the wrapper", and `collect -n 5` was refused on "5".
+# Both read as wrapper bugs to anyone hitting them, because they were. The
+# `collect -type` batch form is the pattern the skill documents for reading one
+# property across a whole inventory, so this took out the efficient path and
+# left only the per-object loop.
+#
+# Read off `govc <verb> -h` on 0.53.0, where the flag package prints `-f=false`
+# for a boolean and `-f=` for everything else. Omitting a flag that does take a
+# value is safe -- that is the previous behaviour -- so verbs whose arity was
+# not checked against govc are simply left out.
+FLAG_TAKES_VALUE = {
+    "collect":                {"-n", "-type", "-dc"},
+    "find":                   {"-type", "-name", "-maxdepth", "-dc"},
+    "ls":                     {"-t", "-dc"},
+    "tree":                   {"-L", "-dc"},
+    "vm.info":                {"-dc"},
+    "host.info":              {"-host", "-dc"},
+    "datastore.info":         {"-dc"},
+    "datacenter.info":        {"-dc"},
+    "cluster.usage":          {"-dc"},
+    "snapshot.tree":          {"-vm", "-dc"},
+    "metric.ls":              {"-i", "-dc"},
+    "metric.sample":          {"-n", "-i", "-instance", "-dc"},
+    "metric.info":            {"-dc"},
+    "events":                 {"-n", "-type", "-dc"},
+    "tasks":                  {"-n", "-dc"},
+    "alarms":                 {"-n", "-dc"},
+    "vm.power":               {"-dc"},
+    "vm.migrate":             {"-host", "-ds", "-pool", "-folder", "-priority", "-dc"},
+    "snapshot.create":        {"-vm", "-d", "-dc"},
+    "snapshot.remove":        {"-vm", "-dc"},
+    "host.maintenance.enter": {"-host", "-timeout", "-dc"},
+    "host.maintenance.exit":  {"-host", "-timeout", "-dc"},
+}
+
 # Flags that read as obvious but that govc does not define for these verbs: the
 # object is a positional argument here, and `-vm`/`-ds` exist only on the verbs
 # that do take them (snapshot.*, vm.migrate, datastore.maintenance.*). Left in
@@ -137,6 +181,19 @@ COLLECT_PROPS = (
     "guest.guestState", "guest.toolsStatus", "guest.toolsRunningStatus",
     "guest.guestFullName", "guest.hostName", "guest.ipAddress",
     "overallStatus", "name",
+    # Cluster HA / DRS / admission control. The whole struct, because vCenter
+    # refuses every path into it: `configurationEx.dasConfig.enabled`,
+    # `.dasConfig` and `.drsConfig` all come back InvalidProperty against a real
+    # 7.x vCenter, and only the bare `configurationEx` resolves. Reading it is
+    # the only way to answer "is HA on?", which is check 6 of the health check
+    # -- without this the check cannot run through the wrapper at all, and a
+    # health report that silently omits HA state is worse than one that fails.
+    #
+    # It is the one entry here that is a struct rather than a scalar, so it is
+    # also the one that can carry free text: `rule[].name` and `group[].name`
+    # are operator-written ("keep SQL apart"). Both objects carry `userCreated`,
+    # and redact_json drops a `name` that sits beside it.
+    "configurationEx",
 )
 
 REFUSED_VERBS = {
@@ -168,6 +225,30 @@ FREE_TEXT_KEYS = {
 }
 
 STRUCTURAL_NAMES = {"", "vm", "host", "datastore", "network", "Resources", "datastore-cluster"}
+
+# Sibling keys that mark a dict's "name" as a SCHEMA identifier -- a property
+# path or a performance counter -- rather than an object's display name.
+#
+#   collect:       {"name": "runtime.connectionState", "op": "assign", "val": ...}
+#   metric.sample: {"name": "cpu.usage.average", "unit": "percent", "value": [...]}
+#
+# The string on its own is indistinguishable from a hostname: both
+# "runtime.connectionState" and "web-01.corp.local" are dotted identifiers, so
+# the FQDN sweep rewrote every property and counter name to FQDN-nnn. The values
+# came through untouched, which made it worse rather than better -- the document
+# still parsed and still had the right numbers in it, it just no longer said
+# what any of them were. `collect` with more than one property was unusable, and
+# so was every metric recipe that reads `.name` to tell its series apart.
+#
+# Structural, not textual, for the same reason keys are left alone: what these
+# strings mean is fixed by the vim25 schema, not by the environment.
+SCHEMA_NAME_SIBLINGS = ("val", "op", "unit")
+
+# ... and the mirror image. `ClusterRuleInfo` and `ClusterGroupInfo` both carry
+# `userCreated`, which is the schema saying in as many words that the adjacent
+# name was typed by an operator. Those are the only free-text fields reachable
+# through the `configurationEx` read above.
+USER_NAMED_SIBLING = "userCreated"
 
 TYPE_PREFIX = {
     "Datacenter": "DC", "VirtualMachine": "VM", "HostSystem": "HOST",
@@ -598,10 +679,21 @@ def redact_json(obj, tmap):
     """
     if isinstance(obj, dict):
         moref = moref_token(obj, tmap)
+        # "name" is overloaded in govc's JSON: usually an object's display name,
+        # which must be tokenised, but a property path or counter name in a
+        # PropertyChange or a metric series, which must not. The siblings say
+        # which -- see SCHEMA_NAME_SIBLINGS / USER_NAMED_SIBLING.
+        named = isinstance(obj.get("name"), str) and obj["name"].strip()
+        schema_name = named and any(k in obj for k in SCHEMA_NAME_SIBLINGS)
+        user_name = named and USER_NAMED_SIBLING in obj
         out = {}
         for k, v in obj.items():
             if moref is not None and k == "value":
                 out[k] = moref
+            elif k == "name" and schema_name:
+                out[k] = v
+            elif k == "name" and user_name:
+                out[k] = "[redacted: free text]"
             elif k.lower() in FREE_TEXT_KEYS and isinstance(v, str) and v.strip():
                 out[k] = "[redacted: free text]"
             else:
@@ -705,20 +797,29 @@ def check_policy(args):
                       % (verb, ", ".join(sorted(ALLOWED_VERBS))))
 
     allowed = VERB_FLAGS[verb]
+    takes_value = FLAG_TAKES_VALUE.get(verb, set())
     positional = []
+    want_value = False
     for a in args[1:]:
+        # The operand of a value-taking flag. It is not a positional argument,
+        # and the checks below that read `positional` must not see it.
+        if want_value:
+            want_value = False
+            continue
         if not a.startswith("-") or a == "-":
             positional.append(a)
             continue
         if a == "--":
             continue
-        flag = a.split("=", 1)[0]
+        flag, eq, _ = a.partition("=")
         if flag in HARD_REFUSED_FLAGS:
             raise Refused("flag '%s' is not permitted: %s"
                           % (flag, HARD_REFUSED_FLAGS[flag]))
-        if flag in allowed:
-            continue
-        if verb == "find" and flag in FIND_FILTERS:
+        is_filter = verb == "find" and flag in FIND_FILTERS
+        if flag in allowed or is_filter:
+            # `-flag=value` carries its own operand; `-flag value` takes the next
+            # argument. Filters are `-runtime.powerState poweredOn` and always do.
+            want_value = not eq and (flag in takes_value or is_filter)
             continue
         if (verb, flag) in POSITIONAL_OBJECT:
             raise Refused(

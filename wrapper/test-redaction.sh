@@ -127,6 +127,16 @@ run datacenter.info
 run pool.info /DC-01/host/CLUSTER-01/Resources
 run cluster.usage CLUSTER-02
 run collect -s VM-0001 summary.runtime.powerState
+# Arity. Every one of these was refused before FLAG_TAKES_VALUE existed, because
+# the flag's operand fell through to `positional` and was then graded as a
+# property name: "property 'h' is not readable through the wrapper".
+run collect -json -type h / name
+run collect -json -type m / name runtime.powerState
+run collect -json -n 0 VM-0001 name
+run collect -json VM-0001 name runtime.powerState summary.quickStats.uptimeSeconds
+# Cluster HA/DRS. Only the whole struct resolves -- vCenter answers
+# InvalidProperty for every path into it -- so the allowlist has to admit it.
+run collect -json CLUSTER-01 configurationEx
 run metric.ls VM-0001
 run events -n 10
 run tasks
@@ -153,6 +163,12 @@ refuse about -xml
 refuse events -n 5 -f                 # unbounded follow
 refuse collect -s VM-0001 config.annotation
 refuse collect -s VM-0001 config.extraConfig
+# Arity must not have become a hole: a flag's operand is skipped, but a real
+# property in positional place is still graded, and an unknown flag is still
+# refused rather than swallowing the next argument.
+refuse collect -json -type m / config.annotation
+refuse collect -json -type m / name config.annotation
+refuse collect -json -bogus m / name
 refuse notaverb
 # Flags govc does not define for these verbs -- the object is positional. They used
 # to sit in the allowlist, so policy permitted them and govc then rejected them with
@@ -246,6 +262,55 @@ check(gs.redact_text("configStatus", tmap) == "configStatus",
       "plain text: a name was substituted inside a longer identifier")
 check(gs.redact_text("config", tmap) == CONFIG_TOK,
       "plain text: a whole-word name was not tokenised")
+
+# "name" is overloaded in govc's JSON, and the FQDN sweep could not tell the
+# readings apart: a property path and a hostname are both dotted identifiers, so
+# `collect -json` came back with every property renamed to FQDN-nnn. The values
+# survived, which is what made it dangerous rather than merely broken -- the
+# document still parsed and still carried the right numbers, it just no longer
+# said what any of them were.
+collect_doc = [
+    {"name": "runtime.connectionState", "op": "assign", "val": "connected"},
+    {"name": "name", "op": "assign", "val": "DC0_H0_VM0"},
+    {"name": "summary.quickStats.uptime", "op": "assign", "val": 19012128},
+]
+got = json.loads(gs.redact_output(json.dumps(collect_doc), tmap))
+check(got[0]["name"] == "runtime.connectionState",
+      "a collect property name was tokenised: %r" % got[0]["name"])
+check(got[2]["name"] == "summary.quickStats.uptime",
+      "a collect property name was tokenised: %r" % got[2]["name"])
+check(got[0]["val"] == "connected", "a property value was mangled: %r" % got[0]["val"])
+# The schema exemption is for the NAME slot only. `val` is data, and a real
+# object name in it must still be tokenised.
+check(gs.TOKEN_RE.fullmatch(got[1]["val"] or ""),
+      "an object name in val position was not tokenised: %r" % got[1]["val"])
+
+# Same overload in metric output, where "name" is a counter.
+metric_doc = {"sample": [{"value": [
+    {"name": "cpu.usage.average", "unit": "percent", "instance": "", "value": [410, 375]}]}]}
+got = json.loads(gs.redact_output(json.dumps(metric_doc), tmap))
+check(got["sample"][0]["value"][0]["name"] == "cpu.usage.average",
+      "a performance counter name was tokenised: %r"
+      % got["sample"][0]["value"][0]["name"])
+
+# The mirror image: a name the schema itself marks as operator-written. Cluster
+# rules and groups are the only free text reachable through `configurationEx`,
+# which the allowlist has to admit whole because vCenter refuses every path into
+# it. Both carry `userCreated`, so the rule is structural like the rest.
+cluster_doc = [{"name": "configurationEx", "op": "assign", "val": {
+    "dasConfig": {"enabled": True, "admissionControlEnabled": True},
+    "drsConfig": {"enabled": True, "defaultVmBehavior": "fullyAutomated"},
+    "rule": [{"name": "keep ACME-Corp SQL apart", "userCreated": True, "enabled": True}],
+    "group": [{"name": "ACME-Corp payroll hosts", "userCreated": True}],
+}}]
+got = json.loads(gs.redact_output(json.dumps(cluster_doc), tmap))[0]["val"]
+check(got["dasConfig"]["enabled"] is True, "an HA boolean was mangled")
+check(got["drsConfig"]["defaultVmBehavior"] == "fullyAutomated",
+      "a DRS enum was mangled: %r" % got["drsConfig"]["defaultVmBehavior"])
+check(got["rule"][0]["name"] == "[redacted: free text]",
+      "an operator-written DRS rule name survived: %r" % got["rule"][0]["name"])
+check(got["group"][0]["name"] == "[redacted: free text]",
+      "an operator-written DRS group name survived: %r" % got["group"][0]["name"])
 
 for m in bad:
     print("[DMG]  %s" % m)
