@@ -35,7 +35,7 @@ govc is the vSphere CLI built on govmomi (https://github.com/vmware/govmomi). It
    If unsure, `$PSVersionTable` succeeds only in PowerShell, and `uname -s` only in a POSIX
    shell.
 
-3. **Verify flags before running unfamiliar commands.** govc has ~300 subcommands and flags evolve between releases. When unsure about exact syntax, run `govc <command> -h` first rather than guessing. This is cheap and prevents failed operations.
+3. **Verify flags before running unfamiliar commands.** govc has 400+ subcommands and flags evolve between releases. When unsure about exact syntax, run `govc <command> -h` first rather than guessing. This is cheap and prevents failed operations.
 
 4. **Establish context.** Most commands need a datacenter context. If the environment has more than one datacenter, set `GOVC_DATACENTER` or pass `-dc` — otherwise commands like `datastore.info` fail with "please specify a datacenter". For environment-wide reports, loop over `govc find / -type d`. Discover the layout first:
    ```bash
@@ -72,8 +72,8 @@ has not been taught is treated as a mutation:
 
 Two consequences are worth knowing *before* you plan a multi-step operation rather than at
 step four: `host.esxcli` is mutate-class even though the verb you pass it may only read
-(the hook cannot see inside the esxcli argument), and `host.shutdown` / `host.reboot` are
-destroy-class, so at `standard` they are refused outright and the *admin* has to reboot the
+(the hook cannot see inside the esxcli argument), and `host.shutdown` (with or without `-r`
+for reboot) is destroy-class, so at `standard` they are refused outright and the *admin* has to reboot the
 host by another route. Runbook reference files declare their own requirements in a
 `## Guard tiers` section — read it first.
 
@@ -129,7 +129,8 @@ GOVC-REPORT report=health-check env=acme-prod status=critical critical=2 warning
   `GOVC-REPORT report=health-check env=acme-prod status=error critical=0 warning=0 ok=0 info=0 baseline=unknown path=-`
 
 The operator's side of this — schedulers, and the permission rules that keep an unattended
-run from stalling — is in `docs/scheduled-reports.md` in the project repository.
+run from stalling — is in `docs/scheduled-reports.md` in the project repository
+(https://github.com/vchaindz/claude-vsphere-skill), not in this installed skill.
 
 ## Output for reports
 
@@ -163,7 +164,7 @@ Read the reference file matching the task — each contains commands, tested pat
 | Task | File |
 |---|---|
 | Install, auth, TLS, env vars, session handling | `references/setup.md` |
-| Inventory, reporting, performance metrics, events, alarms, capacity | `references/inventory-reporting.md` |
+| Inventory, reporting, events, alarms, capacity | `references/inventory-reporting.md` |
 | VM create/clone/power/migrate/destroy, guest ops, templates, OVA import | `references/vm-lifecycle.md` |
 | Snapshots: create, revert, remove, tree, audit | `references/snapshots.md` |
 | Hosts and clusters: maintenance, DRS/HA, rules, resource pools, esxcli | `references/host-cluster.md` |

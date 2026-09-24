@@ -127,6 +127,7 @@ Other useful defaults:
 | `GOVC_FOLDER` | Default inventory folder (`-folder`) |
 | `GOVC_GUEST_LOGIN` | `user:pass` for guest operations |
 | `GOVC_INSECURE` | `true` disables TLS verification (lab/testing only) |
+| `GOVC_VIM_VERSION` | API version to speak. Unset, govc 0.53 sends `9.1.0.0`; set `-` to use whatever the server reports, which is the fix when an older vCenter or ESXi rejects calls or omits properties |
 
 Check one variable at a time: `govc env GOVC_URL`.
 

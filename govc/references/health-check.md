@@ -1,5 +1,13 @@
 # Environment health check
 
+## Guard tiers
+
+Every check is read-class (`about`, `ls`, `find`, `collect`, `vm.info`, `datastore.info`,
+`alarms`, `events`, `tasks`, `snapshot.tree`, and `datastore.ls` for the opt-in check 9, via
+`references/rightsizing.md`) and runs at any tier
+including `readonly`. Nothing here changes vSphere state — which is why `alarms -ack` is
+banned below: it is the one flag that would.
+
 ## What makes this a checklist (and not a query)
 
 A health check is a **fixed, ordered list**: the same nine checks, in the same order, with

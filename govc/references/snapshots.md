@@ -2,6 +2,17 @@
 
 Snapshots are point-in-time delta disks — **not backups**. They grow with every write and degrade performance when old or deep. Say this when users treat them as backups.
 
+## Guard tiers
+
+| Command | Class | Needs |
+|---|---|---|
+| `snapshot.tree`, `vm.info`, `find`, the audit below | read | any tier, including `readonly` |
+| `snapshot.create` | mutate | `standard` |
+| `snapshot.remove`, `snapshot.revert` | destroy | `full`, and a confirmation — at `standard` they are denied outright |
+
+An operator can demote one destroy verb to mutate with `allow = snapshot.revert` in the
+policy file; that is their decision, not something to ask for mid-task.
+
 ## Commands
 
 ```bash

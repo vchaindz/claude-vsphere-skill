@@ -82,10 +82,12 @@ absent on exactly the operator-created alarms whose names were worth hiding.
    days, worst is 91 days" is usually a better answer than 12 rows, and costs
    nothing in identifiers.
 
-6. **Free text is gone by design.** Annotations, snapshot descriptions and event
-   messages are replaced with `[redacted: free text]`, because arbitrary prose
-   cannot be reliably pseudonymised. Do not tell the user a VM "has no
-   annotation" — say the annotation was withheld.
+6. **Free text is gone by design.** Annotations, snapshot descriptions, event
+   and task messages, custom attribute names, DRS rule names and hardware
+   serial numbers are replaced with `[redacted: free text]`, because arbitrary
+   prose cannot be reliably pseudonymised. Guest hostnames and alarm labels
+   come back as tokens (`FQDN-nn`, `ALARM-nn`) instead. Do not tell the user a
+   VM "has no annotation" — say the annotation was withheld.
 
    **Managed object references survive, as tokens.** `"self"`, `"parent"`,
    `"host"`, `"datastore"` and friends come back as
@@ -93,11 +95,12 @@ absent on exactly the operator-created alarms whose names were worth hiding.
    token the object carries everywhere else, so it is your join key: use it to
    correlate objects across two JSON outputs rather than matching on names.
 
-7. **Prefer `-json`.** On the JSON path the wrapper walks the parsed document
-   and rewrites values only, so keys and structure are exact. Plain-text output
-   has no such structure, so a VM named after a field label (`config`, `name`,
-   `host`) can cause a label to be tokenised too. That is over-redaction, never a
-   leak — but `-json` avoids it.
+7. **Expect JSON.** The wrapper adds `-json` to every read verb except `about`,
+   `ls`, `find`, `tree`, `metric.ls`, `metric.info`, `metric.interval.info`,
+   `metric.sample`, `logs.ls` and `vm.ip`, whose plain output holds only
+   inventory names and vSphere's own vocabulary. Plain output has no structure
+   to tell operator text from anything else, so it is only allowed where there
+   is no operator text. Parse the JSON; do not ask for plain output.
 
 8. **Safety rules still apply**, exactly as for unrestricted govc: read-only
    first; confirm before anything destructive, naming the affected **tokens**;
@@ -126,7 +129,7 @@ absent on exactly the operator-created alarms whose names were worth hiding.
 
 Read: `about`, `ls`, `find`, `tree`, `collect`, `vm.info`, `vm.ip`, `host.info`,
 `datastore.info`, `datastore.ls`, `datastore.cluster.info`,
-`datastore.disk.info`, `disk.ls`, `datacenter.info`, `cluster.usage`,
+`datastore.disk.info`, `datacenter.info`, `cluster.usage`,
 `cluster.rule.ls`, `cluster.group.ls`, `cluster.override.info`, `pool.info`,
 `folder`-level `ls`, `device.ls`, `device.info`, `dvs.portgroup.info`,
 `host.date.info`, `host.option.ls`, `host.portgroup.info`, `host.service.ls`,
@@ -149,13 +152,18 @@ Flags fall into two groups, and the difference matters because the same letter
 means different things on different verbs:
 
 - **Refused on every verb**: `-trace`, `-verbose`, `-debug`, `-dump`, `-xml`,
-  `-password`, `-u`, `-k`, `-cert`, `-key`, `-e`. These either write raw SOAP
-  past the redactor or put credentials on a command line.
-- **Refused only where they would leak or never return**: `-l` on `events`,
-  `tasks` and `alarms`, whose long forms print the free-text message; `-f` on
-  `events` and `tasks`, which follows a stream forever. The same letters are
-  fine elsewhere and you should use them — `ls -l`, `find -l`, `about -l`,
-  `snapshot.tree -f` (full path, not follow), `collect -s`, `metric.sample -i`.
+  `-password`, `-u`, `-k`, `-cert`, `-key`. These either write raw SOAP past
+  the redactor or put credentials on a command line.
+- **Refused only where they would leak or never return**: `-e` on `vm.info`,
+  which prints extraConfig and cloud-init secrets (on `tasks` it is the end of
+  the time window and is allowed); `-l` on `events`, `tasks` and `alarms`,
+  whose long forms print the free-text message; `-f` on `events` and `tasks`,
+  which follows a stream forever. The same letters are fine elsewhere and you
+  should use them — `ls -l`, `find -l`, `about -l`, `snapshot.tree -f` (full
+  path, not follow), `metric.sample -i`, `tasks -b 24h -e 0s`.
+- **`collect` needs a property.** With none, govc prints every property of the
+  object, free text included, so the wrapper refuses it. Name what you need:
+  `collect -json VM-0001 summary.runtime.powerState`.
 
 If a question genuinely needs a refused flag, say so and let the user run it
 themselves.
@@ -224,8 +232,8 @@ Two rules override the checklist in token space:
   tokens for any category the user wants to act on. Printing tokens is safe —
   that is what the wrapper is for — but a nine-check report opening with 400
   tokens is unreadable.
-- **`-json` only.** Plain-text output has no structure to redact against, so a VM
-  named after a field label can have the label tokenised alongside it.
+- **`-json` only.** The wrapper forces it on every verb above except `find`, so
+  write the `jq` for JSON even where the command line leaves the flag out.
 
 The report and the baseline file are written in tokens; say so in the footer and
 mention `govc-safe rehydrate <file>`.

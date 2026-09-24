@@ -190,7 +190,7 @@ consolidating **before** the window, not during it. `references/snapshots.md` ha
 ### Running tasks, alarms, hosts already in maintenance
 
 ```bash
-govc tasks -n 50 -l                          # anything still running?
+govc tasks -n 50 -s queued -s running
 govc alarms -json                            # bare form, whole inventory
 
 # hosts already in maintenance, scoped to THIS cluster — the no-go condition is
@@ -327,7 +327,7 @@ govc collect -s "$host" summary.overallStatus              # green?
 govc host.maintenance.exit esx03                           # mutate: needs standard
 
 govc collect -s "$host" runtime.inMaintenanceMode          # false
-govc tasks -n 20 -l                                        # DRS moving VMs back
+govc tasks -n 20 -s queued -s running
 govc alarms -json                                          # nothing new and red
 ```
 

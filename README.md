@@ -171,15 +171,9 @@ Linux/macOS; on Windows run Claude Code from WSL or Git Bash to use it.
 | Linux | download below, or `.deb`/`.rpm` from [releases](https://github.com/vmware/govmomi/releases) |
 | Any | `go install github.com/vmware/govmomi/govc@latest` |
 
-Linux/macOS direct download. Note the `aarch64` → `arm64` mapping — `uname -m` reports
-`aarch64` on ARM, but the published asset is named `arm64`, so the naive one-liner 404s:
-
-```bash
-OS=$(uname -s); ARCH=$(uname -m)
-[ "$ARCH" = "aarch64" ] && ARCH=arm64
-curl -fL "https://github.com/vmware/govmomi/releases/latest/download/govc_${OS}_${ARCH}.tar.gz" \
-  | sudo tar -C /usr/local/bin -xzf - govc
-```
+The Linux direct download, the Windows manual install and the `aarch64` → `arm64` asset
+naming trap are in [`govc/references/setup.md`](govc/references/setup.md), which ships
+with the skill and is the one copy kept up to date.
 
 Verify with `govc version`. For `jq`: `brew install jq` / `apt install jq` / `scoop install jq`.
 
@@ -267,12 +261,12 @@ To persist on Linux/macOS, add the `export` lines to `~/.zshrc` (macOS default s
 powershell -ExecutionPolicy Bypass -File .\test-windows.ps1
 ```
 
-```bash
-# Linux/macOS: installs govc + vcsim + the skill, runs 53 smoke tests against the simulator.
-# No vCenter and no credentials needed — nothing real is touched.
-./test-unix.sh --vcsim
+On Linux/macOS, `--vcsim` installs govc, vcsim and the skill, then runs the smoke tests
+against the simulator — no vCenter, no credentials, nothing real touched. Without it, the
+script runs only the read-only tests against your real vCenter.
 
-# Or against your real vCenter: ~47 READ-ONLY tests
+```bash
+./test-unix.sh --vcsim
 ./test-unix.sh
 # optional snapshot create/remove cycle on an explicitly named non-production VM:
 ./test-unix.sh --write-test my-test-vm

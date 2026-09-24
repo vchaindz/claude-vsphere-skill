@@ -42,6 +42,7 @@ _DATA = os.environ.get("XDG_DATA_HOME") or os.path.join(_HOME, ".local", "share"
 CREDS_FILE = os.environ.get("GOVC_SAFE_CREDS", os.path.join(_CFG, "govc-safe", "creds"))
 MAP_DB = os.environ.get("GOVC_SAFE_MAP", os.path.join(_DATA, "govc-safe", "map.db"))
 GOVC = os.environ.get("GOVC_SAFE_GOVC", "govc")
+SNAPSHOT_BATCH = 200          # VM paths per vm.info call when learning snapshots
 
 # --- policy ------------------------------------------------------------------
 
@@ -236,13 +237,22 @@ FIND_FILTERS = {
 COLLECT_PROPS = (
     "summary.runtime.", "summary.quickStats.", "summary.overallStatus",
     "summary.config.numCpu", "summary.config.memorySizeMB",
-    "summary.config.vmPathName", "summary.hardware.",
+    "summary.config.vmPathName",
+    # Field by field rather than "summary.hardware.": the struct also holds
+    # otherIdentifyingInfo, which is the chassis serial number and asset tag.
+    "summary.hardware.vendor", "summary.hardware.model",
+    "summary.hardware.memorySize", "summary.hardware.cpuModel",
+    "summary.hardware.cpuMhz", "summary.hardware.numCpuPkgs",
+    "summary.hardware.numCpuCores", "summary.hardware.numCpuThreads",
+    "summary.hardware.numNics", "summary.hardware.numHBAs",
     "runtime.powerState", "runtime.connectionState", "runtime.inMaintenanceMode",
     "runtime.consolidationNeeded", "runtime.bootTime",
     "config.hardware.numCPU", "config.hardware.memoryMB", "config.template",
     "config.guestId", "config.version",
+    # Not guest.hostName: a short guest hostname ("sqlprod01") is neither an
+    # inventory name nor dotted, so no pattern would catch it.
     "guest.guestState", "guest.toolsStatus", "guest.toolsRunningStatus",
-    "guest.guestFullName", "guest.hostName", "guest.ipAddress",
+    "guest.guestFullName", "guest.ipAddress",
     "overallStatus", "name",
     # Cluster HA / DRS / admission control. The whole struct, because vCenter
     # refuses every path into it: `configurationEx.dasConfig.enabled`,
@@ -301,7 +311,17 @@ FREE_TEXT_KEYS = {
     "annotation", "description", "fullformattedmessage", "message", "comments",
     "notes", "value", "username", "user", "principal", "acknowledgedbyuser",
     "changetag", "guestfamily", "loginname", "displayname",
+    # Task and event fault text: vCenter error messages quote object names,
+    # including ones no longer in the inventory.
+    "localizedmessage",
+    # otherIdentifyingInfo[]: chassis serial numbers and asset tags.
+    "identifiervalue",
 }
+
+# Keys holding a guest or host short hostname. Tokenised rather than dropped,
+# so a report can still tell machines apart. A short name ("sqlprod01") is
+# neither dotted nor an inventory name, so the text sweeps pass it through.
+HOSTNAME_KEYS = {"hostname"}
 
 STRUCTURAL_NAMES = {"", "vm", "host", "datastore", "network", "Resources", "datastore-cluster"}
 
@@ -401,6 +421,8 @@ SNAP_MOREF_RE = re.compile(r"^snapshot-\d+$")
 # Datastore file paths: "[LocalDS_0] MyVM/MyVM.vmx" and the relative form
 # "MyVM/vmware.log" that appears in the layout arrays.
 DS_PATH_RE = re.compile(r"(\[(?:DS|DSCLUSTER)-\d+\]\s+)([^\s\"',\]]+)")
+# A whole string value that is a datastore path, real name still in brackets.
+DS_PATH_START_RE = re.compile(r"^\[[^\]\n]+\]\s+\S")
 VM_FILE_RE = re.compile(r"\b([A-Za-z0-9_.\-]+)/([A-Za-z0-9_.\-]+"
                         r"\.(?:vmx|vmdk|nvram|log|vmsd|vmsn|vswp|vmxf))\b")
 
@@ -608,18 +630,25 @@ def learn_snapshots(env, tmap):
     Keyed on the snapshot MoRef so the token is stable, and so a SNAP token
     resolves back to an unambiguous identifier rather than a repeatable name.
     """
-    rc, out, _ = run_govc(
+    # Every failure below refuses rather than returns. This used to return
+    # quietly, and then the snapshot names were simply not in the substitution
+    # map, so the call went ahead and printed them. A pass that exists to stop
+    # a leak cannot fail open.
+    rc, out, err = run_govc(
         ["find", "/", "-type", "m", "-snapshot.currentSnapshot", "*"], env)
-    paths = [p for p in out.splitlines() if p.strip()]
-    if rc != 0 or not paths:
-        return
-    rc, out, _ = run_govc(["vm.info", "-json"] + paths, env)
     if rc != 0:
-        return
-    try:
-        doc = json.loads(out)
-    except ValueError:
-        return
+        raise Refused("snapshot enumeration failed: %s" % scrub_error(err, tmap))
+    paths = [p for p in out.splitlines() if p.strip()]
+    docs = []
+    # Batched, so a large estate does not hit the OS argument-length limit.
+    for i in range(0, len(paths), SNAPSHOT_BATCH):
+        rc, out, err = run_govc(["vm.info", "-json"] + paths[i:i + SNAPSHOT_BATCH], env)
+        if rc != 0:
+            raise Refused("snapshot enumeration failed: %s" % scrub_error(err, tmap))
+        try:
+            docs.append(json.loads(out))
+        except ValueError:
+            raise Refused("snapshot enumeration returned unreadable output")
 
     def walk(nodes):
         for n in nodes or []:
@@ -632,8 +661,9 @@ def learn_snapshots(env, tmap):
                     tmap.add_alias("_name", name, token)
             walk(n.get("childSnapshotList"))
 
-    for vm in doc.get("virtualMachines") or []:
-        walk((vm.get("snapshot") or {}).get("rootSnapshotList"))
+    for doc in docs:
+        for vm in (doc or {}).get("virtualMachines") or []:
+            walk((vm.get("snapshot") or {}).get("rootSnapshotList"))
 
 
 # --- redaction ---------------------------------------------------------------
@@ -874,7 +904,7 @@ def redact_json(obj, tmap):
         # which -- see SCHEMA_NAME_SIBLINGS / USER_NAMED_SIBLING.
         named = isinstance(obj.get("name"), str) and obj["name"].strip()
         schema_name = named and any(k in obj for k in SCHEMA_NAME_SIBLINGS)
-        user_name = named and USER_NAMED_SIBLING in obj
+        user_name = named and (USER_NAMED_SIBLING in obj or is_field_def(obj))
         alarm_label = named and ALARM_MARKER in obj
         listing = FILE_LISTING_KEY in obj
         out = {}
@@ -901,6 +931,9 @@ def redact_json(obj, tmap):
                 out[k] = sub if TOKEN_RE.fullmatch(sub) else tmap.token_for("ALARM", v)
             elif k.lower() in SCHEMA_VALUE_KEYS and isinstance(v, str):
                 out[k] = v
+            elif k.lower() in HOSTNAME_KEYS and isinstance(v, str) and v.strip():
+                sub = redact_text(v, tmap)
+                out[k] = sub if TOKEN_RE.fullmatch(sub) else tmap.token_for("FQDN", v.lower())
             elif k.lower() in FREE_TEXT_KEYS and isinstance(v, str) and v.strip():
                 out[k] = "[redacted: free text]"
             else:
@@ -909,8 +942,27 @@ def redact_json(obj, tmap):
     if isinstance(obj, list):
         return [redact_json(v, tmap) for v in obj]
     if isinstance(obj, str):
+        # A string that starts as a datastore path is a path to its end. In
+        # free text DS_PATH_RE has to guess where the path stops and guesses
+        # at the first space, so "[ds] ISO/Win Server 2022.iso" kept
+        # "Server 2022.iso" in the clear. A JSON value has a known end.
+        if DS_PATH_START_RE.match(obj):
+            return redact_folder_path(obj, tmap)
         return redact_text(obj, tmap)
     return obj
+
+
+# A CustomFieldDef: a custom attribute's definition, which is all an
+# `availableField[]` entry is. Its name is either a product's dotted name or
+# whatever an administrator typed -- the reason fields.ls is refused -- and
+# nothing marks which. The key set is exact, so no other struct matches.
+FIELD_DEF_KEYS = {"key", "name", "type", "managedObjectType",
+                  "fieldDefPrivileges", "fieldInstancePrivileges"}
+
+
+def is_field_def(obj):
+    return ("key" in obj and "type" in obj and "value" not in obj
+            and set(obj) <= FIELD_DEF_KEYS)
 
 
 def parse_json_stream(out):
@@ -1069,6 +1121,7 @@ def check_policy(args):
     # `collect` prints the value of an arbitrary property path, so the verb
     # allowlist alone would let `collect VM-0001 config.annotation` through.
     if verb == "collect":
+        props = 0
         for p in positional:
             if p.startswith(("/", "./")) or TOKEN_RE.fullmatch(p.strip()):
                 continue          # an object path, not a property
@@ -1077,7 +1130,41 @@ def check_policy(args):
                     "property '%s' is not readable through the wrapper: only "
                     "non-free-text properties are permitted. Allowed prefixes: %s"
                     % (p, ", ".join(sorted(set(COLLECT_PROPS)))))
+            props += 1
+        # With no property named, govc prints every property of the object,
+        # config.annotation and customValue included -- the check above only
+        # grades properties that were asked for.
+        if not props:
+            raise Refused(
+                "collect needs at least one property: with none, govc prints "
+                "every property, free text included. For example: "
+                "collect -json VM-0001 summary.runtime.powerState")
     return verb
+
+
+# Read verbs whose plain output is safe to hand over as is. Everything in it is
+# either a current inventory name, which the name alternation substitutes, or
+# vSphere's own vocabulary (counter names, log keys, product strings). No
+# operator-written text can appear, so there is nothing for the JSON walk to
+# drop. Every other verb that takes -json gets it forced.
+PLAIN_OK = {"about", "ls", "find", "tree", "metric.ls", "metric.info",
+            "metric.interval.info", "metric.sample", "logs.ls", "vm.ip"}
+
+
+def force_json(verb, args):
+    """Return args with -json as the first flag after the verb.
+
+    Position matters. govc parses flags with Go's flag package, which stops at
+    the first positional argument, so the earlier `args.append("-json")` did
+    nothing for `events VM-0001` or `datastore.ls -ds DS-01 VMDIR-07`: govc read
+    the trailing -json as a second object and printed plain text, the same
+    shape that leaked in v1.2.0. A caller's own `-json` after a positional, or
+    `-json=false`, is dropped for the same reason.
+    """
+    if verb in PLAIN_OK or "-json" not in VERB_FLAGS.get(verb, ()):
+        return args
+    rest = [a for a in args[1:] if a != "-json" and not a.startswith("-json=")]
+    return [args[0], "-json"] + rest
 
 
 # --- entry points ------------------------------------------------------------
@@ -1099,8 +1186,13 @@ def cmd_run(argv):
     # VMs that had been RENAMED, which is the exact case this tool exists for:
     # the folder keeps the old name, and the old name is not in the inventory
     # alternation because that only holds current ones.
-    if verb in ("events", "tasks", "datastore.ls") and "-json" not in args:
-        args.append("-json")
+    #
+    # That was still opt-in per verb, and it was the wrong default: plain
+    # `alarms` printed operator alarm labels, `snapshot.tree -D` printed
+    # snapshot descriptions, and `cluster.rule.ls` printed DRS rule names, all
+    # of which the JSON path drops or tokenises. So every read verb is forced
+    # now, and plain output is the exception that has to be argued for.
+    args = force_json(verb, args)
 
     rc, out, err = run_govc(args, env)
     sys.stdout.write(redact_output(out, tmap))

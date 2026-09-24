@@ -55,8 +55,17 @@ govc vm.info "$SEED_VM" >/dev/null 2>&1 || SEED_VM=/DC0/vm/RENAMED-VM
 
 echo "[..] seeding snapshots with identifying names"
 govc snapshot.remove -vm "$SEED_VM" '*' >/dev/null 2>&1
-govc snapshot.create -vm "$SEED_VM" "$SNAP_A" >/dev/null 2>&1
+govc snapshot.create -vm "$SEED_VM" -d "ACME-Corp change window" "$SNAP_A" >/dev/null 2>&1
 govc snapshot.create -vm "$SEED_VM" "$SNAP_B" >/dev/null 2>&1
+
+# Without seeded free text the alarms and snapshot.tree -D runs had nothing to leak; the scan greps ACME-Corp.
+echo "[..] seeding annotation, custom attribute and DRS rule with identifying text"
+govc vm.change -vm "$SEED_VM" -annotation "owned by ACME-Corp finance" >/dev/null 2>&1
+govc fields.add "ACME-Corp owner" >/dev/null 2>&1
+govc fields.set "ACME-Corp owner" "ACME-Corp cost centre" "$SEED_VM" >/dev/null 2>&1
+govc cluster.rule.remove -cluster /DC0/host/DC0_C0 -name "keep ACME-Corp SQL apart" >/dev/null 2>&1
+govc cluster.rule.create -cluster /DC0/host/DC0_C0 -name "keep ACME-Corp SQL apart" \
+    -enable -anti-affinity /DC0/vm/DC0_C0_RP0_VM0 /DC0/vm/DC0_C0_RP0_VM1 >/dev/null 2>&1
 
 echo "[..] renaming it so its datastore path diverges from its name"
 govc vm.change -vm "$SEED_VM" -name RENAMED-VM >/dev/null 2>&1
@@ -158,6 +167,29 @@ run datastore.ls -ds DS-01 -R -l -json
 run tasks -n 5 -b 24h -e 0s
 run device.ls -vm VM-0001
 run role.ls
+# Go's flag parser stops at the first positional, so an appended -json was read as an object.
+run events VM-0001
+run tasks VM-0001
+run alarms VM-0001
+run vm.info VM-0001 -json
+run collect VM-0001 summary.runtime.powerState -json
+run metric.info
+run metric.interval.info
+run metric.sample VM-0001 cpu.usage.average
+run device.info -vm VM-0001
+run cluster.rule.ls -cluster CLUSTER-02
+run cluster.rule.ls -cluster CLUSTER-02 -l
+run cluster.group.ls -cluster CLUSTER-02
+run cluster.override.info -cluster CLUSTER-02
+run dvs.portgroup.info DVS-01
+run host.date.info -host HOST-01
+run host.option.ls -host HOST-01
+run host.portgroup.info -host HOST-01
+run host.service.ls -host HOST-01
+run host.storage.info -host HOST-01
+run host.vnic.info -host HOST-01
+run host.vswitch.info -host HOST-01
+run logs.ls
 
 echo "[..] exercising the policy boundary (must all be refused)"
 # NOTE: `rehydrate` is deliberately NOT refused here. It is a legitimate operator
@@ -183,6 +215,10 @@ refuse collect -s VM-0001 config.extraConfig
 refuse collect -json -type m / config.annotation
 refuse collect -json -type m / name config.annotation
 refuse collect -json -bogus m / name
+refuse collect VM-0001                  # no property prints every property
+refuse collect -json -type m /
+refuse collect -json VM-0001 guest.hostName
+refuse collect -json HOST-01 summary.hardware.otherIdentifyingInfo
 refuse notaverb
 # A flag must not be a way back to something the verb list already refused.
 refuse vm.ip -esxcli VM-0001            # reaches the host through esxcli
@@ -386,11 +422,11 @@ check(".vmdk" in flat and ".vmx" in flat, "file extensions were destroyed")
 # A folder that IS a live VM must resolve to THAT VM's token, not to a fresh
 # VMDIR -- the orphan scan is a set difference against vm.info output, and two
 # tokens for one folder made 91% of an estate look orphaned.
-vmtok = tmap.lookup("_name", "DC0_H0_VM0")
-if vmtok:
-    check(vmtok in got[0]["folderPath"],
-          "a live VM's folder did not resolve to its own token: %r"
-          % got[0]["folderPath"])
+vmtok = tmap.db.execute(
+    "SELECT token FROM tok WHERE kind='_name' AND real='DC0_H0_VM0'").fetchone()[0]
+check(vmtok in got[0]["folderPath"],
+      "a live VM's folder did not resolve to its own token: %r"
+      % got[0]["folderPath"])
 
 # An AlarmExpression comparison: the value means whatever attributeName says.
 comparisons = [{"name": {"name": "x", "expression": {"expression": [
@@ -428,6 +464,22 @@ check(gh["name"]["name"] == tmap.lookup("_name", "DC0_H0") or
       gs.TOKEN_RE.fullmatch(gh["name"]["name"] or ""),
       "an alarm named after a host did not resolve to its token: %r"
       % gh["name"]["name"])
+
+# Free text with no marker the vcsim fixture can produce: short hostnames, spaced ISO paths, field names, serials.
+vm_doc = {"virtualMachines": [{
+    "guest": {"hostName": "sqlprod01"},
+    "config": {"hardware": {"device": [
+        {"backing": {"fileName": "[LocalDS_0] ISO/ACME Win Server.iso"}}]}},
+    "availableField": [{"key": 101, "name": "ACME-Corp owner", "type": "string"}],
+    "summary": {"hardware": {"otherIdentifyingInfo": [{"identifierValue": "SN-ACME-77"}]}},
+    "recentTask": [{"error": {"localizedMessage": "cannot reach acme-sql"}}]}]}
+got = json.loads(gs.redact_output(json.dumps(vm_doc), tmap))
+flat = json.dumps(got)
+for leak in ("sqlprod01", "ACME", "acme-sql", "Server"):
+    check(leak not in flat, "free text survived: %s in %s" % (leak, flat))
+check(gs.TOKEN_RE.fullmatch(got["virtualMachines"][0]["guest"]["hostName"] or ""),
+      "a guest hostname was not tokenised")
+check(flat.count(".iso") == 1, "the ISO extension was destroyed")
 
 for m in bad:
     print("[DMG]  %s" % m)
@@ -506,7 +558,7 @@ report_cs() { _scan '' "$@"; }
 # vcsim ground-truth object names. "Resources", "vm", "host", "network" and
 # "datastore" are structural inventory folders and are intentionally preserved.
 report "vcsim object names"  'DC0[A-Za-z0-9_-]*|LocalDS[A-Za-z0-9_]*|DVS0[A-Za-z0-9_-]*|DVUplinks[A-Za-z0-9_-]*'
-report "snapshot names"      'ACME-Corp|INC-4471|rollback|migration'
+report "seeded free text"    'ACME-Corp|INC-4471|rollback|migration'
 # A token glued to trailing text means a name was only PARTIALLY substituted:
 # "DC0_H0_VM0" became "CLUSTER-01_VM0" because the cluster name "DC0_H0" is a
 # prefix of it. The remnant carries no literal "DC0", so the scan above cannot
