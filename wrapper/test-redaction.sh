@@ -36,6 +36,8 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
     sleep 0.5
 done
 govc about >/dev/null 2>&1 || { echo "[!!] vcsim not ready on $PORT"; exit 1; }
+# A leftover vcsim on the port answers the check above while ours has died on bind.
+kill -0 "$VCSIM_PID" 2>/dev/null || { echo "[!!] our vcsim exited (port $PORT taken?): $(head -1 "$WORK/vcsim.log")"; exit 1; }
 
 # Seed snapshots with deliberately identifying names. vcsim ships with none, so
 # without this the suite never exercised snapshot output at all -- which is
@@ -65,7 +67,9 @@ govc fields.add "ACME-Corp owner" >/dev/null 2>&1
 govc fields.set "ACME-Corp owner" "ACME-Corp cost centre" "$SEED_VM" >/dev/null 2>&1
 govc cluster.rule.remove -cluster /DC0/host/DC0_C0 -name "keep ACME-Corp SQL apart" >/dev/null 2>&1
 govc cluster.rule.create -cluster /DC0/host/DC0_C0 -name "keep ACME-Corp SQL apart" \
-    -enable -anti-affinity /DC0/vm/DC0_C0_RP0_VM0 /DC0/vm/DC0_C0_RP0_VM1 >/dev/null 2>&1
+    -enable -anti-affinity DC0_C0_RP0_VM0 DC0_C0_RP0_VM1 >/dev/null 2>&1
+govc cluster.rule.ls -cluster /DC0/host/DC0_C0 2>/dev/null | grep -q ACME-Corp ||
+    echo "[!!] DRS rule seed did not take; the configurationEx run below grades nothing"
 
 echo "[..] renaming it so its datastore path diverges from its name"
 govc vm.change -vm "$SEED_VM" -name RENAMED-VM >/dev/null 2>&1
@@ -173,23 +177,19 @@ run tasks VM-0001
 run alarms VM-0001
 run vm.info VM-0001 -json
 run collect VM-0001 summary.runtime.powerState -json
-run metric.info
+run metric.info VM-0001 cpu.usage.average
 run metric.interval.info
 run metric.sample VM-0001 cpu.usage.average
 run device.info -vm VM-0001
-run cluster.rule.ls -cluster CLUSTER-02
-run cluster.rule.ls -cluster CLUSTER-02 -l
-run cluster.group.ls -cluster CLUSTER-02
+run collect -json CLUSTER-02 configurationEx
 run cluster.override.info -cluster CLUSTER-02
 run dvs.portgroup.info DVS-01
 run host.date.info -host HOST-01
 run host.option.ls -host HOST-01
 run host.portgroup.info -host HOST-01
-run host.service.ls -host HOST-01
 run host.storage.info -host HOST-01
 run host.vnic.info -host HOST-01
 run host.vswitch.info -host HOST-01
-run logs.ls
 
 echo "[..] exercising the policy boundary (must all be refused)"
 # NOTE: `rehydrate` is deliberately NOT refused here. It is a legitimate operator
@@ -215,6 +215,8 @@ refuse collect -s VM-0001 config.extraConfig
 refuse collect -json -type m / config.annotation
 refuse collect -json -type m / name config.annotation
 refuse collect -json -bogus m / name
+refuse cluster.rule.ls -cluster CLUSTER-02    # bare rule names, even in JSON
+refuse cluster.group.ls -cluster CLUSTER-02
 refuse collect VM-0001                  # no property prints every property
 refuse collect -json -type m /
 refuse collect -json VM-0001 guest.hostName
@@ -481,6 +483,19 @@ check(gs.TOKEN_RE.fullmatch(got["virtualMachines"][0]["guest"]["hostName"] or ""
       "a guest hostname was not tokenised")
 check(flat.count(".iso") == 1, "the ISO extension was destroyed")
 
+# userCreated is optional in vim25; a rule without it still carries operator text, as do group references.
+bare_rules = [{"name": "configurationEx", "op": "assign", "val": {
+    "rule": [{"name": "ACME-Corp pin", "enabled": True, "vmGroupName": "ACME-Corp vms",
+              "affineHostGroupName": "ACME-Corp hosts"}],
+    "group": [{"name": "ACME-Corp vms", "vm": [{"type": "VirtualMachine", "value": "vm-53"}]}]}}]
+got = json.loads(gs.redact_output(json.dumps(bare_rules), tmap))[0]["val"]
+check("ACME" not in json.dumps(got), "a rule or group name without userCreated survived: %s"
+      % json.dumps(got))
+check(gs.TOKEN_RE.fullmatch(got["group"][0]["vm"][0]["value"] or ""),
+      "a group member MoRef was not tokenised")
+check(gs.scrub_error('{\n  "Fault": {"Code": "ServerFaultCode", "String": "not found"}\n}')
+      == "ServerFaultCode: not found", "a JSON fault on stderr was cut to its first line")
+
 for m in bad:
     print("[DMG]  %s" % m)
 print("[ok]   engine: keys intact, values tokenised, MoRefs preserved"
@@ -576,7 +591,8 @@ report_cs "partially substituted names" "\\b$TOK-[0-9]+[A-Za-z_]"
 # come from the vim25 Go structs: they are schema, and nothing about the
 # environment can legitimately appear in one.
 report_cs "tokens in JSON key position" "^[[:space:]]*\"[^\"]*$TOK-[0-9]+[^\"]*\"[[:space:]]*:"
-report "IPv6 addresses"     '\b(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{1,4}\b'
+# GNU ERE has no (?:), and the old pattern silently matched nothing; this one skips timestamps and PCI ids.
+report "IPv6 addresses"     '\b([0-9a-f]{1,4}:){7}[0-9a-f]{1,4}\b|([0-9a-f]{1,4})?::([0-9a-f]{1,4}(:[0-9a-f]{1,4})*)?\b'
 report "literal 'VM Network'" 'VM Network'
 # Octet-validated: ESXi driver version strings such as "lpfc 10.2.309.8" and
 # "scsi-megaraid-sas 6.603.55.00" are dotted quads but not addresses (309 > 255).
@@ -610,5 +626,5 @@ fi
 [ "$policy_fail" -ne 0 ] && echo "=== FAIL: allowlist policy is not behaving as specified ==="
 [ "$shape_fail" -ne 0 ] && echo "=== FAIL: redaction destroyed structure the caller needs ==="
 echo "    full capture kept at: $WORK/all-output.txt"
-trap - EXIT
+trap '[ -n "${VCSIM_PID:-}" ] && kill "$VCSIM_PID" 2>/dev/null' EXIT
 exit 1

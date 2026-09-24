@@ -123,8 +123,6 @@ VERB_FLAGS = {
     "device.ls":              _J | {"-vm", "-dc", "-boot"},
     "device.info":            _J | {"-vm", "-dc"},
     "vm.ip":                  _J | {"-dc", "-a", "-n", "-v4", "-wait"},
-    "cluster.rule.ls":        _J | {"-cluster", "-dc", "-l", "-name"},
-    "cluster.group.ls":       _J | {"-cluster", "-dc", "-l"},
     "cluster.override.info":  _J | {"-cluster", "-dc"},
     "datastore.cluster.info": _J | {"-dc"},
     "datastore.disk.info":    _J | {"-dc", "-ds", "-c", "-d", "-p", "-uuid"},
@@ -186,8 +184,6 @@ FLAG_TAKES_VALUE = {
     "device.ls":              {"-vm", "-dc"},
     "device.info":            {"-vm", "-dc"},
     "vm.ip":                  {"-dc", "-n", "-wait"},
-    "cluster.rule.ls":        {"-cluster", "-dc", "-name"},
-    "cluster.group.ls":       {"-cluster", "-dc"},
     "cluster.override.info":  {"-cluster", "-dc"},
     "datastore.cluster.info": {"-dc"},
     "datastore.disk.info":    {"-dc", "-ds"},
@@ -300,6 +296,13 @@ REFUSED_VERBS = {
     # datastore.ls output leaked in v1.2.0. Out until it can be tested.
     "disk.ls": "first-class disk names are operator-chosen free text and this "
                "wrapper has no rule for them yet",
+    # Both print rule and group names and nothing else -- a bare string list,
+    # in JSON too, so there is no structure to tell operator text by. The
+    # same rules are readable, names withheld, through configurationEx.
+    "cluster.rule.ls": "prints operator-written DRS rule names only; use "
+                       "collect -json CLUSTER-01 configurationEx",
+    "cluster.group.ls": "prints operator-written DRS group names only; use "
+                        "collect -json CLUSTER-01 configurationEx",
     "env": "prints GOVC_PASSWORD in cleartext",
     "about.cert": "certificate subject/SAN reveal the real vCenter FQDN",
     "import.spec": "OVF properties include password-typed fields",
@@ -316,7 +319,15 @@ FREE_TEXT_KEYS = {
     "localizedmessage",
     # otherIdentifyingInfo[]: chassis serial numbers and asset tags.
     "identifiervalue",
+    # DRS VM-host and dependency rules name their groups, which are operator text.
+    "vmgroupname", "affinehostgroupname", "antiaffinehostgroupname",
+    "vmgroup", "dependsonvmgroup",
 }
+
+# configurationEx's rule[] and group[]: every entry's name is operator text.
+# `userCreated` says so where present, but it is optional in vim25 and a rule
+# created through the API without it would otherwise pass through.
+RULE_LIST_KEYS = {"rule", "group"}
 
 # Keys holding a guest or host short hostname. Tokenised rather than dropped,
 # so a report can still tell machines apart. A short name ("sqlprod01") is
@@ -915,6 +926,10 @@ def redact_json(obj, tmap):
                 out[k] = [redact_file_entry(e, tmap) for e in v]
             elif listing and k == FILE_LISTING_KEY and isinstance(v, str):
                 out[k] = redact_folder_path(v, tmap)
+            elif k in RULE_LIST_KEYS and isinstance(v, list):
+                out[k] = [redact_json(dict(e, name="[redacted: free text]")
+                                      if isinstance(e, dict) and "name" in e else e, tmap)
+                          for e in v]
             elif k == "value" and isinstance(obj.get("attributeName"), str):
                 out[k] = ("[redacted: free text]"
                           if obj["attributeName"].lower() in COMPARISON_PRINCIPAL_ATTRS
@@ -1003,6 +1018,12 @@ def scrub_error(err, tmap=None):
     same redactor as stdout, not just a URL strip."""
     if not err:
         return ""
+    # With -json, which is now forced on most verbs, govc writes its fault as
+    # an indented JSON document, and the first line of that is a lone "{".
+    doc = (parse_json_stream(err) or [None])[0]
+    fault = doc.get("Fault") if isinstance(doc, dict) else None
+    if isinstance(fault, dict) and isinstance(fault.get("String"), str):
+        err = "%s: %s" % (fault.get("Code") or "fault", fault["String"])
     first = err.strip().splitlines()[0] if err.strip() else ""
     first = re.sub(r"https?://\S+", "[vcenter-url]", first)
     if tmap is not None:
@@ -1144,11 +1165,14 @@ def check_policy(args):
 
 # Read verbs whose plain output is safe to hand over as is. Everything in it is
 # either a current inventory name, which the name alternation substitutes, or
-# vSphere's own vocabulary (counter names, log keys, product strings). No
-# operator-written text can appear, so there is nothing for the JSON walk to
-# drop. Every other verb that takes -json gets it forced.
-PLAIN_OK = {"about", "ls", "find", "tree", "metric.ls", "metric.info",
-            "metric.interval.info", "metric.sample", "logs.ls", "vm.ip"}
+# an address the sweeps catch. No operator-written text can appear, so there is
+# nothing for the JSON walk to drop. Every other verb that takes -json gets it
+# forced.
+#
+# Not metric.*: their plain output is vSphere vocabulary, but dotted, so the
+# FQDN sweep turned cpu.usage.average into FQDN-54. Only the JSON walk has the
+# {"name", "unit"} sibling that says a name is a counter.
+PLAIN_OK = {"about", "ls", "find", "tree", "logs.ls", "vm.ip"}
 
 
 def force_json(verb, args):
@@ -1188,9 +1212,10 @@ def cmd_run(argv):
     # alternation because that only holds current ones.
     #
     # That was still opt-in per verb, and it was the wrong default: plain
-    # `alarms` printed operator alarm labels, `snapshot.tree -D` printed
-    # snapshot descriptions, and `cluster.rule.ls` printed DRS rule names, all
-    # of which the JSON path drops or tokenises. So every read verb is forced
+    # `alarms` printed operator alarm labels and `snapshot.tree -D` printed
+    # snapshot descriptions, both of which the JSON path drops or tokenises.
+    # (`cluster.rule.ls` did the same with DRS rule names, but its JSON is a
+    # bare list of them too, so it is refused.) So every read verb is forced
     # now, and plain output is the exception that has to be argued for.
     args = force_json(verb, args)
 

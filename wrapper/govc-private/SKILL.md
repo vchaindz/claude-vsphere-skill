@@ -96,9 +96,8 @@ absent on exactly the operator-created alarms whose names were worth hiding.
    correlate objects across two JSON outputs rather than matching on names.
 
 7. **Expect JSON.** The wrapper adds `-json` to every read verb except `about`,
-   `ls`, `find`, `tree`, `metric.ls`, `metric.info`, `metric.interval.info`,
-   `metric.sample`, `logs.ls` and `vm.ip`, whose plain output holds only
-   inventory names and vSphere's own vocabulary. Plain output has no structure
+   `ls`, `find`, `tree`, `logs.ls` and `vm.ip`, whose plain output holds only
+   inventory names and addresses. Plain output has no structure
    to tell operator text from anything else, so it is only allowed where there
    is no operator text. Parse the JSON; do not ask for plain output.
 
@@ -130,7 +129,7 @@ absent on exactly the operator-created alarms whose names were worth hiding.
 Read: `about`, `ls`, `find`, `tree`, `collect`, `vm.info`, `vm.ip`, `host.info`,
 `datastore.info`, `datastore.ls`, `datastore.cluster.info`,
 `datastore.disk.info`, `datacenter.info`, `cluster.usage`,
-`cluster.rule.ls`, `cluster.group.ls`, `cluster.override.info`, `pool.info`,
+`cluster.override.info`, `pool.info`,
 `folder`-level `ls`, `device.ls`, `device.info`, `dvs.portgroup.info`,
 `host.date.info`, `host.option.ls`, `host.portgroup.info`, `host.service.ls`,
 `host.storage.info`, `host.vnic.info`, `host.vswitch.info`, `logs.ls`,
